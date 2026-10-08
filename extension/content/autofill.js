@@ -704,7 +704,8 @@
     return out;
   }
 
-  // answers: [{ qid, answer, mark?: "filled" | "draft", note? }]
+  // answers: [{ qid, answer, mark?: "filled" | "draft", note?, replace? }]
+  // replace: clear a dropdown's current choice(s) first (feedback fixes).
   async function fillAnswers(answers) {
     let count = 0;
     for (const a of answers) {
@@ -717,7 +718,10 @@
           const group = radioGroup(el);
           ok = values.map((v) => fillRadio(group, v, null)).some(Boolean);
         } else if (el instanceof HTMLSelectElement) ok = fillSelect(el, values[0], null);
-        else if (isCombobox(el)) ok = await fillCombobox(el, values, null);
+        else if (isCombobox(el)) {
+          if (a.replace) await react("clear", el);
+          ok = await fillCombobox(el, values, null);
+        }
         else {
           setNativeValue(el, values[0]);
           ok = true;
@@ -875,6 +879,48 @@
     return out;
   }
 
+  // Every field on the page with its current value, for "fix it with my
+  // feedback": [{ qid, question, kind, value, options, required }]
+  async function snapshotFields() {
+    const out = [];
+    const doneGroups = new Set();
+    let n = 0;
+    for (const el of controls()) {
+      if (el.type === "file") continue;
+      const isGroup = el.type === "radio" || el.type === "checkbox";
+      if (isGroup) {
+        const gk = `${el.type}:${el.name}`;
+        if (doneGroups.has(gk)) continue;
+        doneGroups.add(gk);
+      }
+      const label = labelFor(el);
+      if (!label) continue;
+      let kind, value, options = [];
+      if (isGroup) {
+        const group = radioGroup(el);
+        options = group.map(optionLabel).filter(Boolean);
+        value = group.filter((g) => g.checked).map(optionLabel).join(", ");
+        kind = el.type === "radio" ? "single_choice" : group.length === 1 ? "checkbox" : "multi_choice";
+      } else if (el instanceof HTMLSelectElement) {
+        options = [...el.options].map((o) => clean(o.textContent)).filter((t) => t && !/^(select|choose|please|--)/i.test(t));
+        value = isEmpty(el) ? "" : clean(el.options[el.selectedIndex]?.textContent);
+        kind = "single_choice";
+      } else if (isCombobox(el)) {
+        options = el.__jpOptions || (await comboOptions(el));
+        const ctl = el.closest('[class*="control" i]');
+        value = clean([...(ctl?.querySelectorAll('[class*="single-value" i], [class*="singleValue" i], [class*="multi-value__label" i], [class*="multiValue" i] > div:first-child') || [])].map((x) => x.textContent).join(", "));
+        kind = "dropdown";
+      } else {
+        value = String(el.value || "");
+        kind = el instanceof HTMLTextAreaElement ? "long_text" : el.type === "number" ? "number" : "short_text";
+      }
+      const qid = `fb:${location.host}${location.pathname}#${n++}`;
+      el.setAttribute(QID_ATTR, qid);
+      out.push({ qid, question: label.slice(0, 300), kind, value: value.slice(0, 600), options: options.slice(0, 80), required: isRequired(el, label) });
+    }
+    return out;
+  }
+
   function submit() {
     const re = SUBMIT_RE;
     const forms = [...document.querySelectorAll("form")].filter((f) => f.querySelector("input, textarea, select"));
@@ -917,6 +963,7 @@
     pageNav,
     clickNext,
     invalidFields,
+    snapshotFields,
     _labelFor: labelFor,
     _classify: classify,
   };

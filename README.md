@@ -103,6 +103,16 @@ Settings → Autopilot: auto-submit on/off, jobs at once, a randomized pause bet
 - "Save for next time" on an AI answer reuses it for the same question on later applications, with no AI call.
 - Default model is Sonnet, which is fast. Pick Opus in Settings for the best writing.
 
+## Telling Claude what it got wrong
+
+Wherever Claude did something, there's a way to say what to change:
+
+- **Apply tab → after Autofill → "Something's wrong? Tell Claude"**: e.g. *"Start date should be August 2026, and pick Summer 2027 Internship instead of Both."* Claude reads every field on the page with its current value and changes only the ones your note is about, showing *field: old → new*.
+- **Tailored resume → "Redo with feedback"**: re-runs tailoring with your note (e.g. *"don't reword the Princeton bullets"*).
+- **Autopilot queue**: *Fix with feedback* corrects a job whose tab is still open; *Try again with feedback* re-runs a failed job, and Claude applies your note after filling.
+
+Tick **Remember this for every application** and the note becomes a standing instruction (**Settings → Instructions for Claude**) used on every job, including Autopilot runs. The no-AI-writing rule still holds: Claude can change options and facts, or paste text you typed in the note, but it won't write an answer itself.
+
 ## Can you apply? (work authorization)
 
 Set **Settings → Application profile → U.S. work status** (citizen, permanent resident, other authorization, student visa with CPT/OPT, or not authorized) and whether you hold a security clearance. JobPilot then marks every job:

@@ -44,11 +44,13 @@ function fitOnePage(resume, weights) {
  *   bank: your answer bank [{ id, prompt, text }] — answers you wrote once,
  *         reused when Claude says a question asks the same thing
  *   answersOnly: later pages of a multi-page form (no resume/letter work)
+ *   instructions / feedback: your standing instructions, and what you said
+ *         was wrong with the last attempt for this job
  * Returns { company, role, keywords, missing, changes, answers, aiUsed }
  *   answers: [{ qid, answer, source: "rule"|"saved"|"ai", kind, required }]
  */
 export async function prepareJob(opts) {
-  const { settings, base, posting, job = {}, profile, savedAnswers = {}, questions = [], useAI = true, autopilot = false, cover = null, bank = [], answersOnly = false } = opts;
+  const { settings, base, posting, job = {}, profile, savedAnswers = {}, questions = [], useAI = true, autopilot = false, cover = null, bank = [], answersOnly = false, instructions = "", feedback = "" } = opts;
   const coverOn = !answersOnly && C.coverReady(cover);
   const bankReady = bank.filter((b) => (b.text || "").trim());
   const text = posting?.text || "";
@@ -102,6 +104,8 @@ export async function prepareJob(opts) {
       cover: coverAsk,
       bank: pending.some((q) => /text/.test(q.kind)) ? bankReady : [],
       draftText: !autopilot,
+      instructions,
+      feedback,
     });
     // Your own answers from the bank, for questions Claude says they fit.
     const bankById = Object.fromEntries(bankReady.map((b) => [b.id, b]));

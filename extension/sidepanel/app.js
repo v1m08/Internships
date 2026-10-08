@@ -8,7 +8,7 @@ import * as Page from "../lib/page.js";
 import * as Update from "../lib/update.js";
 import * as L from "../lib/layout.js";
 import * as G from "../lib/grad.js";
-import { resolveStuck } from "../lib/resolve.js";
+import { resolveStuck, fixWithFeedback } from "../lib/resolve.js";
 import * as C from "../lib/cover.js";
 import * as E from "../lib/eligibility.js";
 import * as Sources from "../lib/sources.js";
@@ -31,6 +31,8 @@ const S = {
   eligStore: {}, // jobId -> { signals, at }: Simplify job data, cached a week
   eligSignals: {}, // jobId -> signals (fresh entries of eligStore)
   eligPage: {}, // jobKey -> signals read from the open posting
+  fb: {}, // open feedback boxes: key -> { open, text, remember }
+  fixResult: null, // last "fix with my feedback" result on the Apply tab
   jobsCache: { fetchedAt: 0, items: [] },
   tab: null,
   job: null, // { key, company, title, url, listingId? }
@@ -408,7 +410,16 @@ function tailorCard(hasKey) {
         { class: "row end", style: { marginTop: "10px" } },
         h("button", { class: "btn ghost", onclick: () => ((S.pending = null), renderApply()) }, "Cancel"),
         h("button", { class: "btn primary", onclick: acceptTailoring }, accepted ? `Use ${accepted} change${accepted === 1 ? "" : "s"}` : "Use resume as is")
-      )
+      ),
+      hasKey
+        ? feedbackBox({
+            key: `tailor:${S.job.key}`,
+            button: "Redo with feedback",
+            placeholder: "e.g. Don't reword the Princeton bullets; keep my skills order.",
+            rerender: renderApply,
+            run: (text) => startTailor(text),
+          })
+        : null
     );
     return card;
   }
@@ -439,7 +450,7 @@ function tailorCard(hasKey) {
           },
           "Edit"
         ),
-        h("button", { class: "btn", onclick: startTailor, disabled: !hasKey }, "Re-tailor"),
+        h("button", { class: "btn", onclick: () => startTailor(), disabled: !hasKey }, "Re-tailor"),
         h(
           "button",
           {
@@ -452,7 +463,16 @@ function tailorCard(hasKey) {
           },
           "Remove"
         )
-      )
+      ),
+      hasKey
+        ? feedbackBox({
+            key: `tailor:${S.job.key}`,
+            button: "Redo with feedback",
+            placeholder: "e.g. Don't reword the Princeton bullets; leave the cover letter's why paragraph as I wrote it.",
+            rerender: renderApply,
+            run: (text) => startTailor(text),
+          })
+        : null
     );
     return card;
   }
@@ -465,7 +485,7 @@ function tailorCard(hasKey) {
   return card;
 }
 
-async function startTailor() {
+async function startTailor(feedback = "") {
   await withBusy("tailor", async () => {
     const posting = await Page.readJobPosting(S.tab);
     S.posting[S.job.key] = posting;
@@ -474,7 +494,7 @@ async function startTailor() {
       const meta = (await Page.callAll(S.tab, "jobMeta")).find((m) => m.company || m.role) || {};
       job = { company: job.company || meta.company || "", title: job.title || meta.role || "" };
     }
-    const prep = await prepareJob({ settings: S.settings, base: S.base, posting, job, profile: S.profile, useAI: aiReady(), cover: S.cover });
+    const prep = await prepareJob({ settings: S.settings, base: S.base, posting, job, profile: S.profile, useAI: aiReady(), cover: S.cover, instructions: S.settings.instructions || "", feedback });
     S.pending = { company: prep.company, role: prep.role, keywords: prep.keywords, missing: prep.missing, changes: prep.changes, grad: prep.grad, gradNote: prep.gradNote, coverTemplate: prep.coverTemplate };
   });
 }
@@ -522,6 +542,38 @@ function fillCard(hasResume) {
       );
     if (r.filled.length) summary.push(h("details", { style: { marginTop: "6px" } }, h("summary", { class: "small" }, "What was filled (green on the page)"), h("ul", { class: "report-list" }, r.filled.map((x) => h("li", {}, h("strong", {}, x.label), ": ", x.value)))));
     card.append(...summary);
+    // Tell Claude what's wrong on the page; it changes only those fields.
+    const fx = S.fixResult;
+    if (fx) {
+      card.append(
+        h(
+          "div",
+          { class: `notice ${fx.changed.length ? "good" : "warn"}`, style: { marginTop: "8px" } },
+          fx.changed.length ? `Changed ${fx.changed.length} field${fx.changed.length === 1 ? "" : "s"} from your feedback.` : "Nothing changed.",
+          fx.changed.length ? h("ul", { class: "report-list" }, fx.changed.map((c) => h("li", {}, h("strong", {}, c.label), `: ${c.from} → ${c.to}`))) : null,
+          fx.note ? h("div", { class: "small", style: { marginTop: "4px" } }, fx.note) : null
+        )
+      );
+    }
+    card.append(
+      h(
+        "div",
+        { style: { marginTop: "8px" } },
+        feedbackBox({
+          key: `fill:${S.job.key}`,
+          button: "Something's wrong? Tell Claude",
+          placeholder: "e.g. Start date should be August 2026, and pick Summer 2027 Internship instead of Both.",
+          rerender: renderApply,
+          run: async (text) => {
+            S.fixResult = await fixWithFeedback(
+              S.tab,
+              { settings: S.settings, profile: profileForJob(), resumeText: resumeToText(currentTailored()?.resume || S.base), posting: S.posting[S.job.key]?.text || "", instructions: S.settings.instructions || "" },
+              text
+            );
+          },
+        })
+      )
+    );
   }
   return card;
 }
@@ -536,7 +588,7 @@ async function doAutofill() {
     if (aiReady() && report.controls) {
       try {
         const posting = S.posting[S.job?.key]?.text || "";
-        const r = await resolveStuck(S.tab, { settings: S.settings, profile, resumeText: resumeToText(currentTailored()?.resume || S.base), posting });
+        const r = await resolveStuck(S.tab, { settings: S.settings, profile, resumeText: resumeToText(currentTailored()?.resume || S.base), posting, instructions: S.settings.instructions || "" });
         const done = new Set([...r.filled, ...r.drafted].map((x) => x.label));
         report.review = report.review.filter((x) => !done.has(x.label));
         report.filled.push(...r.filled.map((x) => ({ ...x, value: `${x.value} (matched by Claude)` })), ...r.drafted.map((x) => ({ ...x, value: `${x.value} (Claude's pick, purple)` })));
@@ -546,6 +598,7 @@ async function doAutofill() {
       }
     }
     S.report = report;
+    S.fixResult = null;
   });
 }
 
@@ -1040,7 +1093,7 @@ function queueRow(it) {
       ? h(
           "div",
           { class: "row", style: { marginTop: "4px" } },
-          RETRYABLE.includes(it.status) && h("button", { class: "btn small", disabled: runningElsewhere(), onclick: () => tryAgain([it]) }, "Try again"),
+          RETRYABLE.includes(it.status) && h("button", { class: "btn small", disabled: runningElsewhere(), onclick: () => tryAgain([it]) }, it.feedback ? "Try again (with your feedback)" : "Try again"),
           h("button", { class: "btn ghost small", onclick: open }, it.tabId ? "Go to tab" : "Open"),
           !["failed", "ineligible"].includes(it.status) && h("button", { class: "btn ghost small", onclick: markApplied }, "I submitted it"),
           h(
@@ -1057,8 +1110,31 @@ function queueRow(it) {
             "Remove"
           )
         )
-      : null
+      : null,
+    queueFeedback(it)
   );
+}
+
+// Feedback on an Autopilot job: fix its open tab now, or re-run it with
+// your note (Claude also applies the note after filling).
+function queueFeedback(it) {
+  const hasTab = it.tabId && ["review", "needs-you"].includes(it.status);
+  if (!hasTab && !["failed", "needs-you"].includes(it.status)) return null;
+  return feedbackBox({
+    key: `q:${it.id}`,
+    button: hasTab ? "Fix with feedback" : "Try again with feedback",
+    placeholder: hasTab ? "What's wrong on that page? e.g. Graduation should be May 2029." : "What should it do differently? e.g. Pick Summer Internship; my start date is August 2026.",
+    rerender: renderJobs,
+    run: async (text) => {
+      it.feedback = [it.feedback, text].filter(Boolean).join(" ");
+      if (hasTab) {
+        const tab = await chrome.tabs.get(it.tabId);
+        const r = await fixWithFeedback(tab, { settings: S.settings, profile: S.profile, resumeText: resumeToText(S.tailored[it.job.key]?.resume || S.base), instructions: S.settings.instructions || "" }, text);
+        it.note = r.changed.length ? `Changed ${r.changed.map((c) => `${c.label}: ${c.to}`).join("; ").slice(0, 200)}${r.note ? `. ${r.note}` : ""}` : `Nothing changed. ${r.note}`;
+        saveQueue();
+      } else await tryAgain([it]);
+    },
+  });
 }
 
 // Inside the side panel: hand the run to a pinned JobPilot tab (setting), so
@@ -1741,6 +1817,44 @@ function coverCard() {
   );
 }
 
+// ----------------------------------------------------- feedback to Claude
+
+// Standing instructions: what you've asked Claude to always do.
+function rememberInstruction(text) {
+  const lines = (S.settings.instructions || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!lines.includes(text)) lines.push(text);
+  S.settings.instructions = lines.join("\n");
+  saveSettings();
+}
+
+// "Tell Claude what it got wrong": a button that opens a box. run(text)
+// does the work; rerender() redraws the tab it lives on.
+function feedbackBox({ key, button, placeholder, run, rerender, primary = false }) {
+  const st = (S.fb[key] ||= { open: false, text: "", remember: false });
+  if (!st.open) return h("button", { class: `btn ${primary ? "" : "ghost "}small`, onclick: () => ((st.open = true), rerender()) }, button);
+  const go = async (e) => {
+    const text = st.text.trim();
+    if (!text) return toast("Say what to change first.", true);
+    e.target.disabled = true;
+    e.target.replaceChildren(spinner(), " Working…");
+    try {
+      if (st.remember) rememberInstruction(text);
+      await run(text);
+      S.fb[key] = { open: false, text: "", remember: false };
+    } catch (err) {
+      toast(err.message, true);
+    }
+    rerender();
+  };
+  return h(
+    "div",
+    { class: "change", style: { marginTop: "6px" } },
+    textarea({ rows: 2, value: st.text, placeholder, oninput: (e) => (st.text = e.target.value) }),
+    h("label", { class: "row small", style: { margin: "4px 0" } }, h("input", { type: "checkbox", checked: st.remember, onchange: (e) => (st.remember = e.target.checked) }), "Remember this for every application"),
+    h("div", { class: "row end" }, h("button", { class: "btn ghost small", onclick: () => ((S.fb[key].open = false), rerender()) }, "Cancel"), h("button", { class: "btn primary small", onclick: go }, "Send to Claude"))
+  );
+}
+
 // ------------------------------------------------------- answer bank
 
 const saveBank = debounce(() => store.set("answerBank", S.bank), 400);
@@ -2243,7 +2357,15 @@ function renderSettings() {
     )
   );
 
-  el.replaceChildren(aiCard, profileCard, answersCard, bankCard(), autopilotCard, sourceCard, filesCard, updatesCard, dataCard);
+  const instructionsCard = h(
+    "div",
+    { class: "card" },
+    h("h3", {}, "Instructions for Claude"),
+    h("p", { class: "small muted" }, "Things Claude should always do when filling applications and tailoring, one per line. Feedback you mark \"Remember\" lands here."),
+    textarea({ rows: 3, value: st.instructions || "", placeholder: "e.g. For internship vs co-op questions, pick the summer internship.", oninput: (e) => ((st.instructions = e.target.value), saveSettings()) })
+  );
+
+  el.replaceChildren(aiCard, profileCard, answersCard, bankCard(), instructionsCard, autopilotCard, sourceCard, filesCard, updatesCard, dataCard);
 }
 
 function hr() {

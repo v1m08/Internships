@@ -8,12 +8,12 @@
 //                  answer submitted as yours would look bad
 //   unknown     -> skipped (amber)
 import * as Page from "./page.js";
-import { resolveFields } from "./ai.js";
+import { resolveFields, applyFeedback } from "./ai.js";
 
 const isText = (q) => q.kind === "short_text" || q.kind === "long_text";
 
 // -> { filled: [{ label, value }], drafted: [...], skipped: [{ label, reason }] }
-export async function resolveStuck(tab, { settings, profile, resumeText, posting = "" }) {
+export async function resolveStuck(tab, { settings, profile, resumeText, posting = "", instructions = "" }) {
   const fields = await Page.collectQuestions(tab, { stuck: true, profile });
   const result = { filled: [], drafted: [], skipped: [] };
   // Essays never go through this step: they're for "Draft answers" with review.
@@ -21,7 +21,7 @@ export async function resolveStuck(tab, { settings, profile, resumeText, posting
   for (const q of fields) if (q.kind === "long_text" && q.required) result.skipped.push({ label: q.question.slice(0, 80), reason: "Needs your own words (use Draft answers to start one)" });
   if (!ask.length) return result;
 
-  const answers = await resolveFields(settings, { fields: ask, profile, resumeText, posting });
+  const answers = await resolveFields(settings, { fields: ask, profile, resumeText, posting, instructions });
   const byId = Object.fromEntries(ask.map((q) => [q.qid, q]));
   const toFill = [];
   for (const a of answers) {
@@ -44,12 +44,12 @@ export async function resolveStuck(tab, { settings, profile, resumeText, posting
 // After Submit: fields the site rejected ("Enter a valid phone number").
 // Claude reads the error and the current value and fixes facts or formats;
 // it never writes your own-words answers here either. -> number fixed
-export async function fixInvalid(tab, { settings, profile, resumeText, posting = "" }) {
+export async function fixInvalid(tab, { settings, profile, resumeText, posting = "", instructions = "" }) {
   const lists = await Page.callAll(tab, "invalidFields");
   const bad = lists.flat().filter((q) => q.kind !== "long_text");
   if (!bad.length) return 0;
   const fields = bad.map((q) => ({ ...q, question: `${q.question} (the site says: "${q.error}"; current value: "${q.value}")` }));
-  const answers = await resolveFields(settings, { fields, profile, resumeText, posting });
+  const answers = await resolveFields(settings, { fields, profile, resumeText, posting, instructions });
   const byId = Object.fromEntries(bad.map((q) => [q.qid, q]));
   const toFill = [];
   for (const a of answers) {
@@ -59,4 +59,28 @@ export async function fixInvalid(tab, { settings, profile, resumeText, posting =
     toFill.push({ qid: q.qid, answer: q.kind === "dropdown" ? values : values[0], mark: a.basis === "fact" ? "filled" : "draft", note: `fixed after the site said: ${q.error}` });
   }
   return toFill.length ? Page.fillAnswers(tab, toFill) : 0;
+}
+
+// "You made mistakes, here's what to change": Claude edits only the fields
+// your feedback is about. -> { changed: [{ label, from, to }], note }
+export async function fixWithFeedback(tab, { settings, profile, resumeText, posting = "", instructions = "" }, feedback) {
+  const fields = (await Page.callAll(tab, "snapshotFields")).flat();
+  if (!fields.length) return { changed: [], note: "No form fields on this page." };
+  const out = await applyFeedback(settings, { fields, feedback, instructions, profile, resumeText, posting });
+  const byId = Object.fromEntries(fields.map((q) => [q.qid, q]));
+  const toFill = [];
+  const changed = [];
+  for (const c of out.changes || []) {
+    const q = byId[c.qid];
+    const values = (c.answer || []).map((v) => String(v).trim()).filter(Boolean);
+    if (!q || !values.length) continue;
+    // Text fields only take text you wrote in the feedback (or plain facts).
+    if (/text/.test(q.kind) && c.basis === "preference") continue;
+    const to = values.join(", ");
+    if (to === q.value) continue;
+    toFill.push({ qid: q.qid, answer: /multi|dropdown/.test(q.kind) ? values : values[0], replace: true, mark: c.basis === "preference" ? "draft" : "filled", note: "changed from your feedback" });
+    changed.push({ label: q.question.slice(0, 80), from: q.value || "(empty)", to });
+  }
+  if (toFill.length) await Page.fillAnswers(tab, toFill);
+  return { changed, note: out.note || "" };
 }

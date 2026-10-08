@@ -27,6 +27,7 @@ export const DEFAULT_SETTINGS = {
   updateRepo: "v1m08/Internships",
   updateBranch: "main",
   autoUpdate: "ask", // "auto" | "ask" | "off"
+  instructions: "", // standing instructions for Claude, one per line (Settings → Instructions for Claude)
   coverAttach: "any", // attach your cover letter to "any" cover letter field | "required" ones only | "off"
 };
 

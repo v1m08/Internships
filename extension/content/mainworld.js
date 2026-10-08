@@ -53,6 +53,10 @@
     const multi = !!inner.isMulti;
     let options = flatten(inner.options);
     if (d.op === "options") return { ok: true, labels: options.map(labelOf), async: !!loader, multi };
+    if (d.op === "clear") {
+      if (typeof inner.clearValue === "function") inner.clearValue();
+      return { ok: true };
+    }
     if (d.op === "search") {
       if (loader) options = await search(loader, d.query || "");
       return { ok: true, labels: options.map(labelOf), async: !!loader, multi };

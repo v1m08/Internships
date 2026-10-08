@@ -278,13 +278,15 @@ const JOB_SYSTEM = `You help a student apply to one internship. Five tasks; any 
 // bullets: [{ id, text }]; questions: [{ qid, question, kind, options }]
 // draftText: false = never write short_text/long_text answers (Autopilot);
 // those are only covered by your answer bank.
-export async function rewriteAndAnswer(settings, { bullets, keywords, posting, questions, resumeText, profile, company, role, cover = null, bank = [], draftText = true }) {
+export async function rewriteAndAnswer(settings, { bullets, keywords, posting, questions, resumeText, profile, company, role, cover = null, bank = [], draftText = true, instructions = "", feedback = "" }) {
   if (!bullets.length && !questions.length && !cover) return { bullet_edits: [], answers: [] };
   const content = [
     `<job company="${company || ""}" role="${role || ""}">\n${posting}\n</job>`,
     keywords.length ? `<posting_keywords_the_resume_already_has>${keywords.join(", ")}</posting_keywords_the_resume_already_has>` : "",
     bullets.length ? `<bullets>\n${JSON.stringify(bullets)}\n</bullets>` : "",
     cover ? `<cover_letter>\n${JSON.stringify(cover)}\n</cover_letter>` : "",
+    instructionsBlock(instructions),
+    feedback ? `<feedback_on_last_attempt>\nThe student reviewed your last attempt for this job and says: ${feedback}\nFollow it.\n</feedback_on_last_attempt>` : "",
     !draftText && questions.length ? "Don't write answers for short_text or long_text questions: return \"\" for them. Only bank_matches may cover them." : "",
     bank.length && questions.length ? `<answer_bank>\n${JSON.stringify(bank.map((b) => ({ bank_id: b.id, question: b.prompt, answer: b.text.slice(0, 600) })))}\n</answer_bank>` : "",
     questions.length ? `<resume>\n${resumeText}\n</resume>\n<profile>${JSON.stringify(profile)}</profile>\n<questions>\n${JSON.stringify(questions.map(({ qid, question, kind, options }) => ({ qid, question, kind, options })))}\n</questions>` : "",
@@ -312,19 +314,57 @@ const RESOLVE_SYSTEM = `You finish a job application form for a student. Each fi
   "preference" = a choice the student would plausibly make that the profile doesn't state outright (e.g. which internship term, a team, a shift), picked to fit the posting and resume.
   "writing" = needs the student's own words (why this company, describe a project, cover-letter style text, anything opinion or motivation). Return answer [] for these.
   "unknown" = a fact you don't have (referral name, ID numbers, salary, a date not in the profile). Return answer [].
-Never invent facts. Keep answers short.`;
+Never invent facts. Keep answers short. Follow the student's instructions when given (e.g. which term they prefer).`;
+
+// Standing instructions from Settings → Instructions for Claude.
+const instructionsBlock = (instructions) => (instructions?.trim() ? `<student_instructions>\n${instructions.trim()}\n</student_instructions>` : "");
 
 // fields: [{ qid, question, kind, options, required, field?, wanted? }]
-export async function resolveFields(settings, { fields, profile, resumeText, posting }) {
+export async function resolveFields(settings, { fields, profile, resumeText, posting, instructions = "" }) {
   if (!fields.length) return [];
   const content = [
     posting ? `<job>\n${posting.slice(0, 6000)}\n</job>` : "",
     `<profile>${JSON.stringify(profile)}</profile>`,
     `<resume>\n${resumeText.slice(0, 8000)}\n</resume>`,
+    instructionsBlock(instructions),
     `<fields>\n${JSON.stringify(fields.map(({ qid, question, kind, options, required, wanted }) => ({ qid, question, kind, options, required, wanted })))}\n</fields>`,
   ]
     .filter(Boolean)
     .join("\n\n");
   const out = await callJSON(settings, { system: RESOLVE_SYSTEM, content, schema: RESOLVE_SCHEMA, effort: "low" });
   return out.fields || [];
+}
+
+// ------------------------------------------------ fixing with feedback
+// The student says what's wrong ("start date is August 2026", "pick Summer
+// internship, not Both"); Claude changes only those fields. It may paste
+// text the student wrote in the feedback, but never writes answers itself.
+
+const FEEDBACK_SCHEMA = obj({
+  changes: arr(obj({ qid: str, answer: arr(str), basis: { type: "string", enum: ["fact", "preference", "student_text"] } })),
+  note: str,
+});
+
+const FEEDBACK_SYSTEM = `A student reviewed a job application form that was filled in for them and says some of it is wrong. Fix exactly what their feedback asks for, and nothing else.
+
+Rules:
+- Only change fields the feedback refers to (or that break their standing instructions). Leave every other field alone.
+- For fields with options, copy the option text exactly (several only for multi_choice/multi-select dropdowns). For a dropdown without listed options, give the text to search for.
+- basis "fact" when the value comes from the feedback, profile or resume; "preference" for a choice the feedback asks for; "student_text" when you copy text the student wrote in the feedback into a text field.
+- Never write an answer in your own words. If the feedback asks you to write or rewrite an open answer without giving the text, don't change that field and say so in note.
+- note: one short sentence on what you changed or couldn't change.`;
+
+// fields: snapshotFields() output (current values included)
+export async function applyFeedback(settings, { fields, feedback, instructions = "", profile, resumeText, posting = "" }) {
+  const content = [
+    `<feedback>\n${feedback}\n</feedback>`,
+    instructionsBlock(instructions),
+    posting ? `<job>\n${posting.slice(0, 4000)}\n</job>` : "",
+    `<profile>${JSON.stringify(profile)}</profile>`,
+    `<resume>\n${(resumeText || "").slice(0, 6000)}\n</resume>`,
+    `<form_fields>\n${JSON.stringify(fields.map(({ qid, question, kind, value, options }) => ({ qid, question, kind, value, options })))}\n</form_fields>`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  return callJSON(settings, { system: FEEDBACK_SYSTEM, content, schema: FEEDBACK_SCHEMA, effort: "low" });
 }

@@ -17,7 +17,7 @@
 //   ineligible your U.S. work status rules it out (eligibility.js); tab closed
 //   failed     error
 import * as G from "./grad.js";
-import { resolveStuck, fixInvalid } from "./resolve.js";
+import { resolveStuck, fixInvalid, fixWithFeedback } from "./resolve.js";
 import { resumeToText } from "./pdf.js";
 import * as Page from "./page.js";
 import { prepareJob, tailoredEntry } from "./tailor.js";
@@ -72,7 +72,7 @@ export async function runJob(job, ctx) {
     const existing = ctx.tailoredFor(job);
     const profile = G.profileWithGrad(ctx.profile, existing ? existing.grad : G.gradForJob(ctx.profile, posting?.text, job.title)?.date);
     const resumeText = resumeToText(ctx.base);
-    const unstick = { settings: ctx.settings, profile, resumeText, posting: posting?.text || "" };
+    const unstick = { settings: ctx.settings, profile, resumeText, posting: posting?.text || "", instructions: ctx.settings.instructions || "" };
 
     let tailored = existing;
     let files = null; // { file, coverFile } once the resume is ready
@@ -107,6 +107,8 @@ export async function runJob(job, ctx) {
         cover: ctx.cover,
         bank: ctx.bank || [],
         answersOnly: !!files,
+        instructions: ctx.settings.instructions || "",
+        feedback: ctx.feedback || "",
       });
       aiUsed = aiUsed || prep.aiUsed;
       if (!files) {
@@ -126,6 +128,11 @@ export async function runJob(job, ctx) {
       if (toFill.length) await Page.fillAnswers(tab, toFill);
       const attested = (await Page.callAll(tab, "checkAttestations")).reduce((a, b) => a + b, 0);
       filledCount += first.filled.length + toFill.length + attested;
+      // Your feedback from the last attempt: Claude corrects those fields.
+      if (ctx.feedback) {
+        step(`${where}Applying your feedback`);
+        await fixWithFeedback(tab, unstick, ctx.feedback).catch(() => {});
+      }
       aiTyped.push(...prep.answers.filter((a) => isTyped(a) && a.source === "ai"));
 
       const needsWords = prep.answers.filter((a) => a.required && !a.answer && a.source === "needs-words");
@@ -214,7 +221,7 @@ export async function runQueue(items, ctx, { concurrency = 2, onUpdate, shouldSt
       item.status = "running";
       item.note = "";
       onUpdate(item);
-      const res = await runJob(item.job, { ...ctx, step: (s) => ((item.note = s), onUpdate(item)) });
+      const res = await runJob(item.job, { ...ctx, feedback: item.feedback || "", step: (s) => ((item.note = s), onUpdate(item)) });
       Object.assign(item, res, { finishedAt: Date.now() });
       onUpdate(item);
     }
