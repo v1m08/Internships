@@ -93,6 +93,8 @@ For each job:
 
 Every finished job except submitted ones has a **Try again** button (and **Try all again** for failed, blocked, not-eligible and apply-manually jobs): it closes the old tab and runs the job again right away, re-checking eligibility in case you changed your work status. On an *Apply manually* job it attempts the site anyway and only stops if it actually lands on a sign-in page.
 
+**Running in the background.** Jobs open in their own unfocused *Autopilot* window (one per job at a time), as that window's visible tab, so Chrome doesn't throttle, freeze or unload them and you can keep using your own windows. Leave that window open, ideally not minimized. Autopilot's own waits run in a worker that Chrome doesn't slow down in hidden tabs, every step has a time limit, and a job that takes longer than 8 minutes is stopped and left as *Needs you* with the step it was on, so the queue keeps moving. The queue shows how long each running job has been on its current step.
+
 Settings → Autopilot: auto-submit on/off, jobs at once, a randomized pause between applications, running in its own tab, and background checks for new jobs.
 
 ## Speed and consistency

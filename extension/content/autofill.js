@@ -541,8 +541,29 @@
     return el.tabIndex === -1 && getComputedStyle(el).opacity === "0" && el.type !== "file";
   }
 
+  // Pages can hold several forms (Waymo: video caption settings, a "notify
+  // me" sign-up and the application). Work only inside the application.
+  const NOT_APPLICATION = /notify|subscribe|newsletter|sign ?up|talent (community|network)|join our|job alert|search|favorites?|log ?in|sign ?in/i;
+  function appRoot() {
+    const forms = [...document.querySelectorAll("form")].filter((f) => f.querySelector(CONTROL_SEL));
+    if (forms.length < 2) return document;
+    const score = (f) => {
+      const ctrls = [...f.querySelectorAll(CONTROL_SEL)].filter((el) => !isPlayerControl(el));
+      const text = `${f.id} ${f.className} ${f.getAttribute("action") || ""} ${[...f.querySelectorAll('button, input[type="submit"]')].map((b) => b.innerText || b.value).join(" ")}`;
+      let sc = ctrls.length;
+      if (ctrls.some((el) => el.type === "file" && /resume|cv|curriculum/i.test(`${el.name} ${el.id} ${labelFor(el)}`))) sc += 100;
+      else if (ctrls.some((el) => el.type === "file")) sc += 30;
+      if (NOT_APPLICATION.test(text)) sc -= 100;
+      return sc;
+    };
+    const best = forms.map((f) => ({ f, sc: score(f) })).sort((a, b) => b.sc - a.sc)[0];
+    return best && best.sc > 0 ? best.f : document;
+  }
+  // Video player settings (video.js caption colors etc.) aren't form fields.
+  const isPlayerControl = (el) => !!el.closest('.vjs-text-track-settings, [class*="vjs-"], [class*="video-player" i], [class*="player-settings" i]');
+
   function controls() {
-    return [...document.querySelectorAll(CONTROL_SEL)].filter((el) => !el.disabled && !el.readOnly && isVisible(el) && !isShadowInput(el));
+    return [...appRoot().querySelectorAll(CONTROL_SEL)].filter((el) => !el.disabled && !el.readOnly && isVisible(el) && !isShadowInput(el) && !isPlayerControl(el));
   }
 
   async function fill({ profile, resumeFile, coverFile = null, coverOnlyIfRequired = false }) {
@@ -930,7 +951,8 @@
 
   function submit() {
     const re = SUBMIT_RE;
-    const forms = [...document.querySelectorAll("form")].filter((f) => f.querySelector("input, textarea, select"));
+    const app = appRoot();
+    const forms = app === document ? [...document.querySelectorAll("form")].filter((f) => f.querySelector("input, textarea, select") && !NOT_APPLICATION.test(`${f.id} ${f.className} ${f.innerText.slice(0, 300)}`)) : [app];
     for (const root of forms.length ? forms : [document]) {
       const btns = [...root.querySelectorAll('button, input[type="submit"], [role="button"]')].filter((b) => visibleEl(b) && !b.disabled);
       const btn = btns.find((b) => b.type === "submit" && re.test(clickableText(b))) || btns.find((b) => re.test(clickableText(b))) || btns.find((b) => b.type === "submit");

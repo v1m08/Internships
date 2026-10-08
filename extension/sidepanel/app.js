@@ -1075,7 +1075,8 @@ async function refreshJobList() {
 
 const STATUS_PILL = { queued: "", running: "", applied: "good", review: "info", "needs-you": "warn", manual: "", failed: "bad", ineligible: "bad" };
 const STATUS_LABEL = { queued: "Queued", running: "Working", applied: "Applied", review: "Review & submit", "needs-you": "Needs you", manual: "Apply manually", failed: "Failed", ineligible: "Not eligible" };
-const saveQueue = debounce(() => store.set("autopilotQueue", S.queue), 300);
+// Saved right away: debounce timers get throttled while the run tab is hidden.
+const saveQueue = () => store.set("autopilotQueue", S.queue);
 
 function autopilotCard() {
   const ap = S.settings.autopilot;
@@ -1160,6 +1161,15 @@ async function tryAgain(items) {
   if (!S.autopilotRunning) await startAutopilot(0);
 }
 
+const timeOnStep = (at) => {
+  const s = Math.max(0, Math.round((Date.now() - at) / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+};
+// Keep "time on this step" ticking (just the text, so typing isn't interrupted).
+setInterval(() => {
+  for (const el of document.querySelectorAll(".elapsed[data-at]")) el.textContent = ` · ${timeOnStep(Number(el.dataset.at))}`;
+}, 5000);
+
 function queueRow(it) {
   const open = async () => {
     if (it.tabId) {
@@ -1190,7 +1200,7 @@ function queueRow(it) {
       h("span", { class: "small muted", style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, it.job.title),
       h("span", { class: `pill ${STATUS_PILL[it.status] || ""}` }, it.status === "running" ? [spinner(), " "] : null, STATUS_LABEL[it.status])
     ),
-    it.note ? h("div", { class: "small muted", style: { marginTop: "2px" } }, it.note) : null,
+    it.note ? h("div", { class: "small muted", style: { marginTop: "2px" } }, it.note, it.status === "running" && it.stepAt ? h("span", { class: "elapsed", "data-at": it.stepAt }, ` · ${timeOnStep(it.stepAt)}`) : null) : null,
     ["review", "needs-you", "manual", "failed", "ineligible"].includes(it.status)
       ? h(
           "div",

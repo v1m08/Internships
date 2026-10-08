@@ -25,7 +25,11 @@ import { prepareJob, tailoredEntry } from "./tailor.js";
 // Sites that usually need an account. Skipped by default; "Try again" on one
 // (ctx.force) attempts it anyway and stops only at an actual sign-in page.
 const ACCOUNT_SITES = /myworkdayjobs\.com|workday\.com|icims\.com|taleo\.net|successfactors|oraclecloud\.com|brassring|amazon\.jobs|careers\.microsoft\.com|google\.com\/about\/careers|careers\.google\.com/i;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+import { sleep } from "./clock.js";
+
+// A job that takes longer than this is stopped and left for you, so one
+// stuck site can't hold up the queue.
+const JOB_LIMIT_MS = 8 * 60 * 1000;
 const MAX_PAGES = 6; // multi-page forms: Next/Continue up to this many times
 const isTyped = (q) => q.kind === "short_text" || q.kind === "long_text";
 
@@ -36,7 +40,8 @@ export async function runJob(job, ctx) {
   if (ACCOUNT_SITES.test(job.url) && !ctx.force) return { status: "manual", note: "This site usually needs an account. Try again to attempt it anyway, or open it and click Autofill on each page." };
 
   step("Opening");
-  let tab = await chrome.tabs.create({ url: job.url, active: false });
+  let tab = await openJobTab(job.url, ctx.slot);
+  ctx.onTab?.(tab.id);
   try {
     let size = await Page.waitForForm(tab);
     let posting = null;
@@ -209,12 +214,39 @@ export async function runJob(job, ctx) {
   }
 }
 
+// Each worker gets its own unfocused Autopilot window and opens jobs as that
+// window's visible tab. Background tabs get their timers throttled and can
+// be frozen or unloaded by Chrome; the visible tab of a window doesn't, and
+// you can keep using your own windows meanwhile.
+async function openJobTab(url, slot) {
+  let tab = null;
+  if (slot?.windowId) {
+    try {
+      tab = await chrome.tabs.create({ windowId: slot.windowId, url, active: true });
+    } catch {
+      slot.windowId = null; // you closed it
+    }
+  }
+  if (!tab) {
+    try {
+      const win = await chrome.windows.create({ url, focused: false, state: "normal", width: 1100, height: 900 });
+      if (slot) slot.windowId = win.id;
+      tab = win.tabs[0];
+    } catch {
+      tab = await chrome.tabs.create({ url, active: false });
+    }
+  }
+  chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => {});
+  return tab;
+}
+
 // Run a queue with limited concurrency. items: [{ job, status }]
 // onUpdate(item) after each change; shouldStop() checked between jobs.
 export async function runQueue(items, ctx, { concurrency = 2, onUpdate, shouldStop, pauseSec = 0 }) {
   let next = 0;
   let started = 0;
-  const worker = async () => {
+  const worker = async (slotIndex) => {
+    const slot = { index: slotIndex, windowId: null };
     while (next < items.length && !shouldStop()) {
       const item = items[next++];
       if (item.status !== "queued") continue;
@@ -226,10 +258,32 @@ export async function runQueue(items, ctx, { concurrency = 2, onUpdate, shouldSt
       item.status = "running";
       item.note = "";
       onUpdate(item);
-      const res = await runJob(item.job, { ...ctx, feedback: item.feedback || "", force: !!item.force, step: (s) => ((item.note = s), onUpdate(item)) });
-      Object.assign(item, res, { finishedAt: Date.now() });
+      // Watchdog: past the time limit, stop at the next step and move on.
+      let cancelled = false;
+      let tabId = null;
+      const jobCtx = {
+        ...ctx,
+        slot,
+        feedback: item.feedback || "",
+        force: !!item.force,
+        onTab: (id) => (tabId = id),
+        step: (s) => {
+          if (cancelled) throw new Error("stopped");
+          item.note = s;
+          item.stepAt = Date.now();
+          onUpdate(item);
+        },
+      };
+      const res = await Promise.race([
+        runJob(item.job, jobCtx),
+        sleep(JOB_LIMIT_MS).then(() => {
+          cancelled = true;
+          return { status: "needs-you", note: `Stopped after ${JOB_LIMIT_MS / 60000} min at "${item.note || "starting"}". The tab is left open; Try again or finish it yourself.`, tabId };
+        }),
+      ]);
+      Object.assign(item, res, { finishedAt: Date.now(), stepAt: null });
       onUpdate(item);
     }
   };
-  await Promise.all(Array.from({ length: concurrency }, worker));
+  await Promise.all(Array.from({ length: concurrency }, (_, i) => worker(i)));
 }

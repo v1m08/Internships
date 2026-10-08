@@ -1,3 +1,5 @@
+import { sleep, withTimeout } from "./clock.js";
+
 // Talking to the active tab: reading the job posting and running the
 // autofill engine (content/autofill.js) in every frame.
 
@@ -15,16 +17,24 @@ function assertScriptable(tab) {
   if (!tab || !/^https?:/.test(tab.url || "")) throw new Error("Open a job posting or application page in this tab first.");
 }
 
+// injectImmediately: don't wait for every frame to finish loading. Pages
+// full of ad/tracker frames (which may never finish) used to hang here.
 async function inject(tabId) {
-  await Promise.all([
-    chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content/autofill.js"] }),
-    // Page-world helper for react-select dropdowns (see content/mainworld.js).
-    chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content/mainworld.js"], world: "MAIN" }).catch(() => {}),
-  ]);
+  await withTimeout(
+    Promise.all([
+      chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content/autofill.js"], injectImmediately: true }),
+      // Page-world helper for react-select dropdowns (see content/mainworld.js).
+      chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content/mainworld.js"], world: "MAIN", injectImmediately: true }).catch(() => {}),
+    ]),
+    20000,
+    "The page"
+  );
 }
 
-async function runInFrames(tabId, func, args = []) {
-  const results = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func, args });
+// Every call into the page has a time limit, so a frozen or navigating tab
+// can't stall Autopilot forever.
+async function runInFrames(tabId, func, args = [], timeoutMs = 45000) {
+  const results = await withTimeout(chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func, args, injectImmediately: true }), timeoutMs, "The page");
   return results.map((r) => r.result).filter((r) => r !== undefined && r !== null);
 }
 
@@ -46,7 +56,7 @@ export async function readJobPosting(tab) {
 export async function autofill(tab, payload) {
   assertScriptable(tab);
   await inject(tab.id);
-  const reports = await runInFrames(tab.id, (p) => window.__jobpilot.fill(p), [payload]);
+  const reports = await runInFrames(tab.id, (p) => window.__jobpilot && window.__jobpilot.fill(p), [payload], 90000);
   // Only attach the resume once, in the first frame that has a resume field.
   const merged = { filled: [], review: [], attached: null, skippedFilled: 0, controls: 0 };
   for (const r of reports) {
@@ -64,12 +74,13 @@ export async function autofill(tab, payload) {
 export async function collectQuestions(tab, opts = {}) {
   assertScriptable(tab);
   await inject(tab.id);
-  const lists = await runInFrames(tab.id, (o) => window.__jobpilot.collectQuestions(o), [opts]);
+  const lists = await runInFrames(tab.id, (o) => window.__jobpilot && window.__jobpilot.collectQuestions(o), [opts]);
   return lists.flat();
 }
 
 export async function fillAnswers(tab, answers) {
-  const counts = await runInFrames(tab.id, (a) => window.__jobpilot.fillAnswers(a), [answers]);
+  await inject(tab.id);
+  const counts = await runInFrames(tab.id, (a) => window.__jobpilot && window.__jobpilot.fillAnswers(a), [answers], 90000);
   return counts.reduce((a, b) => a + b, 0);
 }
 
@@ -78,7 +89,7 @@ export async function fillAnswers(tab, answers) {
 // Run a window.__jobpilot function in every frame; returns per-frame results.
 export async function callAll(tab, name, args = []) {
   await inject(tab.id);
-  return runInFrames(tab.id, (n, a) => window.__jobpilot[n](...a), [name, args]);
+  return runInFrames(tab.id, (n, a) => window.__jobpilot && window.__jobpilot[n](...a), [name, args]);
 }
 
 export function waitForLoad(tabId, timeoutMs = 30000) {
@@ -88,11 +99,10 @@ export function waitForLoad(tabId, timeoutMs = 30000) {
       if (done) return;
       done = true;
       chrome.tabs.onUpdated.removeListener(listener);
-      clearTimeout(timer);
       resolve();
     };
     const listener = (id, info) => id === tabId && info.status === "complete" && finish();
-    const timer = setTimeout(finish, timeoutMs);
+    sleep(timeoutMs).then(finish);
     chrome.tabs.onUpdated.addListener(listener);
     chrome.tabs.get(tabId).then((t) => t.status === "complete" && finish(), finish);
   });
@@ -117,7 +127,7 @@ export async function waitForForm(tab, { timeoutMs = 8000, minControls = 3 } = {
       if ((size.controls >= minControls && stable >= 2) || stable >= 4) break;
     } else stable = 0;
     last = size.controls;
-    await new Promise((r) => setTimeout(r, 250));
+    await sleep(250);
   }
   return size;
 }
