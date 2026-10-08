@@ -7,11 +7,12 @@ import * as Jobs from "../lib/jobs.js";
 import * as Page from "../lib/page.js";
 import * as Update from "../lib/update.js";
 import * as L from "../lib/layout.js";
+import * as G from "../lib/grad.js";
 import * as Sources from "../lib/sources.js";
 import * as Autopilot from "../lib/autopilot.js";
 import * as Ans from "../lib/answers.js";
 import * as K from "../lib/keywords.js";
-import { prepareJob, tailoredEntry } from "../lib/tailor.js";
+import { prepareJob, tailoredEntry, gradIfAccepted } from "../lib/tailor.js";
 
 // ------------------------------------------------------------------ state
 
@@ -183,6 +184,12 @@ function currentTailored() {
   return S.job ? S.tailored[S.job.key] : null;
 }
 
+// Your profile for the current job: with that job's graduation date if its
+// tailored resume shifted it (see grad.js).
+function profileForJob() {
+  return G.profileWithGrad(S.profile, currentTailored()?.grad);
+}
+
 function jobLabel() {
   const t = currentTailored();
   const company = t?.company || S.job?.company || "";
@@ -321,7 +328,8 @@ function tailorCard(hasKey) {
       h("div", { class: "chips" }, (p.keywords || []).map((k) => h("span", { class: "pill good" }, k))),
       p.missing?.length ? h("div", { class: "small muted", style: { marginTop: "6px" } }, "Not on your resume. Add only if you really have them:") : null,
       h("div", { class: "chips" }, (p.missing || []).map((k) => h("span", { class: "pill warn" }, k))),
-      h("div", { class: "small muted", style: { marginTop: "8px" } }, p.changes.length ? `${p.changes.length} suggested changes. Untick any you don't want:` : "Your resume already matches this posting well. No changes suggested.")
+      h("div", { class: "small muted", style: { marginTop: "8px" } }, p.changes.length ? `${p.changes.length} suggested changes. Untick any you don't want:` : "Your resume already matches this posting well. No changes suggested."),
+      p.gradNote ? h("div", { class: "notice warn", style: { marginTop: "6px" } }, p.gradNote) : null
     );
     for (const c of p.changes) {
       card.append(
@@ -342,7 +350,7 @@ function tailorCard(hasKey) {
             h(
               "div",
               {},
-              h("div", { class: "where" }, { bullet: "Bullet", line: "Skills", hide: "Hide bullet", order: "Reorder", summary: "Summary" }[c.type], " · ", c.where),
+              h("div", { class: "where" }, { bullet: "Bullet", line: "Skills", hide: "Hide bullet", order: "Reorder", summary: "Summary", grad: "Graduation" }[c.type], " · ", c.where),
               h("div", { class: "before" }, c.before),
               h("div", { class: "after" }, c.after),
               c.reason && h("div", { class: "reason" }, c.reason)
@@ -416,7 +424,7 @@ async function startTailor() {
       job = { company: job.company || meta.company || "", title: job.title || meta.role || "" };
     }
     const prep = await prepareJob({ settings: S.settings, base: S.base, posting, job, profile: S.profile, useAI: aiReady() });
-    S.pending = { company: prep.company, role: prep.role, keywords: prep.keywords, missing: prep.missing, changes: prep.changes };
+    S.pending = { company: prep.company, role: prep.role, keywords: prep.keywords, missing: prep.missing, changes: prep.changes, grad: prep.grad, gradNote: prep.gradNote };
   });
 }
 
@@ -431,6 +439,7 @@ function acceptTailoring() {
     changeCount: accepted.length,
     keywords: p.keywords,
     missing: p.missing,
+    grad: gradIfAccepted(p, accepted),
     createdAt: Date.now(),
   };
   // Keep the 40 most recent tailored versions.
@@ -468,7 +477,7 @@ function fillCard(hasResume) {
 async function doAutofill() {
   await withBusy("fill", async () => {
     const file = await resumeFileForJob();
-    S.report = await Page.autofill(S.tab, { profile: S.profile, resumeFile: file });
+    S.report = await Page.autofill(S.tab, { profile: profileForJob(), resumeFile: file });
   });
 }
 
@@ -539,7 +548,7 @@ async function doDraftAnswers() {
     const results = [];
     const pending = [];
     for (const q of questions) {
-      const det = Ans.answerDeterministically(q, S.profile, saved);
+      const det = Ans.answerDeterministically(q, profileForJob(), saved);
       if (det) results.push({ ...q, answer: det.answer, source: det.source });
       else pending.push(q);
     }
@@ -553,7 +562,7 @@ async function doDraftAnswers() {
         posting: K.trimPosting(posting.text),
         questions: pending,
         resumeText: resumeToText(t?.resume || S.base),
-        profile: S.profile,
+        profile: profileForJob(),
         company: jobLabel().company,
         role: jobLabel().role,
       });
@@ -1593,6 +1602,13 @@ function renderSettings() {
     pf("school", "School"),
     h("div", { class: "grid2" }, pf("degree", "Degree", "Bachelor of Science"), pf("major", "Major")),
     h("div", { class: "grid2" }, pf("gradMonth", "Graduation month", "May"), pf("gradYear", "Graduation year", "2028")),
+    h(
+      "details",
+      { open: !!(p.gradEarliest || p.gradLatest) },
+      h("summary", { class: "small" }, "Flexible graduation date"),
+      h("p", { class: "small muted", style: { margin: "6px 0" } }, "If you could graduate any time in a range (e.g. by credits, Dec 2028, or on the normal track, May 2030), set it here. For each job, tailoring picks the date in this range that the posting asks for, puts it on that resume's Education line, and uses it for that application's graduation questions. Jobs that don't say keep the date above."),
+      h("div", { class: "grid2" }, pf("gradEarliest", "Earliest", "December 2028"), pf("gradLatest", "Latest", "May 2030"))
+    ),
     h("div", { class: "grid2" }, pf("gpa", "GPA", "optional"), pf("availableStart", "Available to start", "May 2027")),
     h("div", { class: "grid2" }, pf("currentCompany", "Current company", "defaults to school"), pf("currentTitle", "Current title"))
   );

@@ -47,6 +47,9 @@ export const DEFAULT_PROFILE = {
   gpa: "",
   gradMonth: "",
   gradYear: "",
+  // Flexible graduation window ("December 2028" … "May 2030"); empty = fixed.
+  gradEarliest: "",
+  gradLatest: "",
   currentCompany: "",
   currentTitle: "",
   workAuthorized: "yes",

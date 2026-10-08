@@ -94,23 +94,26 @@ function index(r) {
   const bullets = new Map();
   const lines = new Map();
   const sections = new Map();
+  const entries = new Map();
   for (const s of r.sections) {
     sections.set(s.id, s);
+    for (const e of s.entries) entries.set(e.id, e);
     for (const e of s.entries) for (const b of e.bullets) bullets.set(b.id, { b, e, s });
     for (const l of s.lines) lines.set(l.id, { l, s });
   }
-  return { bullets, lines, sections };
+  return { bullets, lines, sections, entries };
 }
 
 export function applyChanges(base, changes) {
   const r = clone(base);
-  const { bullets, lines, sections } = index(r);
+  const { bullets, lines, sections, entries } = index(r);
   for (const c of changes) {
     if (!c.accepted) continue;
     if (c.type === "bullet" && bullets.has(c.target)) bullets.get(c.target).b.text = c.after;
     if (c.type === "line" && lines.has(c.target)) lines.get(c.target).l.text = c.after;
     if (c.type === "hide" && bullets.has(c.target)) bullets.get(c.target).b.hidden = true;
     if (c.type === "summary") r.summary = c.after;
+    if (c.type === "grad" && entries.has(c.target)) entries.get(c.target)[c.field] = c.after;
     if (c.type === "order" && sections.has(c.target)) {
       const s = sections.get(c.target);
       s.entries = c.order.map((id) => s.entries.find((e) => e.id === id)).filter(Boolean);

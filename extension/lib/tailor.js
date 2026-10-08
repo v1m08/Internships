@@ -4,6 +4,7 @@
 import * as K from "./keywords.js";
 import * as A from "./answers.js";
 import * as R from "./resume.js";
+import * as G from "./grad.js";
 import { rewriteAndAnswer } from "./ai.js";
 import { fitsOnePage, resumeToText, loadFonts } from "./pdf.js";
 
@@ -49,11 +50,15 @@ export async function prepareJob(opts) {
   const { keywords, missing, weights } = K.analyze(text, resumeText);
   const changes = K.deterministicChanges(base, weights, R.uid);
 
+  // Flexible graduation: the date in your window this posting asks for.
+  let grad = G.gradForJob(profile, text, job.title);
+  let jobProfile = G.profileWithGrad(profile, grad?.date);
+
   // Standard questions without AI.
   const answers = [];
   const pending = [];
   for (const q of questions) {
-    const det = A.answerDeterministically(q, profile, savedAnswers);
+    const det = A.answerDeterministically(q, jobProfile, savedAnswers);
     if (det) answers.push({ ...q, answer: det.answer, source: det.source });
     else if (autopilot && !q.required && /text/.test(q.kind)) answers.push({ ...q, answer: "", source: "skipped" }); // optional essays: leave blank
     else pending.push(q);
@@ -70,7 +75,7 @@ export async function prepareJob(opts) {
       posting: K.trimPosting(text),
       questions: pending,
       resumeText,
-      profile,
+      profile: jobProfile,
       company: job.company,
       role: job.title,
     });
@@ -83,6 +88,17 @@ export async function prepareJob(opts) {
       const added = [...K.termsOf(after)].filter((t) => !K.termsOf(b.text).has(t) && keywords.includes(t));
       changes.push({ id: R.uid("c"), type: "bullet", target: b.id, where: b.where, before: b.text, after, reason: added.length ? `Adds posting terms: ${added.join(", ")}` : "Matches the posting's wording", accepted: true });
     }
+    // The posting's eligibility in words the patterns missed ("rising seniors…").
+    const aiWindow = G.windowFromAI(out.graduation_window);
+    if (grad && !grad.shifted && !grad.outside && aiWindow && !G.postingWindow(text, job.title)) {
+      grad = G.gradForJob(profile, text, job.title, aiWindow);
+      jobProfile = G.profileWithGrad(profile, grad.date);
+      for (const a of answers) {
+        if (a.source !== "rule") continue;
+        const det = A.answerDeterministically(a, jobProfile, savedAnswers);
+        if (det) a.answer = det.answer;
+      }
+    }
     const aiAnswers = Object.fromEntries((out.answers || []).map((a) => [a.qid, a.answer]));
     for (const q of pending) {
       let ans = (aiAnswers[q.qid] || "").trim();
@@ -91,6 +107,14 @@ export async function prepareJob(opts) {
     }
   } else {
     for (const q of pending) answers.push({ ...q, answer: "", source: "none" });
+  }
+
+  if (grad?.shifted) {
+    const c = G.gradChange(base, profile, grad.date);
+    const reason = grad.why ? `Posting: "${grad.why}"` : "Fits the posting's graduation window";
+    if (c) changes.unshift({ id: R.uid("c"), type: "grad", ...c, reason, accepted: true });
+    // No date on the resume to change: still use it in the application.
+    else changes.unshift({ id: R.uid("c"), type: "grad", target: "", field: "", where: "Application", before: G.formatDate(G.profileWindow(profile).def), after: G.formatDate(grad.date), reason, accepted: true });
   }
 
   // Fit to one page deterministically.
@@ -108,7 +132,14 @@ export async function prepareJob(opts) {
     changes,
     answers,
     aiUsed,
+    grad: grad?.shifted ? grad.date : null,
+    gradNote: grad?.outside ? `This posting looks for graduates outside your window ("${grad.why}").` : "",
   };
+}
+
+// The graduation date a saved tailored version uses (only if you kept that change).
+export function gradIfAccepted(prep, accepted) {
+  return prep.grad !== null && prep.grad !== undefined && accepted.some((c) => c.type === "grad") ? prep.grad : null;
 }
 
 export function tailoredEntry(base, prep, url) {
@@ -121,6 +152,7 @@ export function tailoredEntry(base, prep, url) {
     changeCount: accepted.length,
     keywords: prep.keywords,
     missing: prep.missing,
+    grad: gradIfAccepted(prep, accepted),
     createdAt: Date.now(),
   };
 }

@@ -255,13 +255,16 @@ export async function parseResume(settings, pdfBase64) {
 const JOB_SCHEMA = obj({
   bullet_edits: arr(obj({ id: str, text: str })),
   answers: arr(obj({ qid: str, answer: str })),
+  graduation_window: obj({ earliest: str, latest: str }),
 });
 
-const JOB_SYSTEM = `You help a student apply to one internship. Two tasks; either list may be empty.
+const JOB_SYSTEM = `You help a student apply to one internship. Three tasks; either list may be empty.
 
 1. bullet_edits: reword resume bullets so they use the posting's terminology where the SAME work truthfully fits. Only bullets that clearly improve; at most 6. Keep every number and fact; never add tools, skills, metrics or claims that aren't in the bullet or elsewhere in the resume; keep length similar (≤ ~110 characters); start with a strong past-tense verb; keep any **bold** markup. Use the given ids.
 
-2. answers: answer each listed application question as the student, first person, using only facts from the resume and profile. short_text: a few words to one sentence. long_text: 80–150 words unless the question sets a length; connect the student's real experience to this company and role. single_choice / dropdown / multi_choice: reply with exactly one of the given options' text; for preference questions (team, location, interest area, shift) pick the option that best fits the resume and posting. Answer "" only for factual questions the resume and profile don't cover (e.g. a referrer's name, a specific date, an ID number).`;
+2. answers: answer each listed application question as the student, first person, using only facts from the resume and profile. short_text: a few words to one sentence. long_text: 80–150 words unless the question sets a length; connect the student's real experience to this company and role. single_choice / dropdown / multi_choice: reply with exactly one of the given options' text; for preference questions (team, location, interest area, shift) pick the option that best fits the resume and posting. Answer "" only for factual questions the resume and profile don't cover (e.g. a referrer's name, a specific date, an ID number).
+
+3. graduation_window: the range of graduation dates the posting is open to, as "Month YYYY" (earliest and latest), worked out from its eligibility wording (e.g. "first-year students" for a Summer 2027 internship means graduating around May 2030; "rising seniors" means around May 2028). Use "" for an open end, and "" for both when the posting doesn't say.`;
 
 // bullets: [{ id, text }]; questions: [{ qid, question, kind, options }]
 export async function rewriteAndAnswer(settings, { bullets, keywords, posting, questions, resumeText, profile, company, role }) {

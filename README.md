@@ -60,6 +60,8 @@ Choose **Anthropic API key** in Settings and paste a key from [console.anthropic
 
 **Settings → Application profile / Standard answers.** These are pre-filled from your resume; check work authorization, sponsorship and the other standard answers.
 
+**Flexible graduation date (optional).** If you could graduate any time in a range (say Dec 2028 by credits, May 2030 on the normal track), set *Earliest* and *Latest* under **Settings → Application profile → Flexible graduation date**. For each job, JobPilot reads who the posting is for ("graduating between Dec 2028 and Jun 2029", "class of 2029", "first-year students", "rising juniors"…) and picks the date in your range that fits, closest to your usual one. That date goes on that job's tailored resume (shown as a *Graduation* change you can untick) and into that application's graduation and class-year answers. Postings that don't say keep your usual date.
+
 ### 4. Updates
 
 JobPilot checks this repo for new commits every few hours and puts a **↑** badge on its icon when there's an update. Set it up in **Settings → Updates**:

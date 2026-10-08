@@ -15,6 +15,7 @@
 //   needs-you  blocker (CAPTCHA, login, missing required field, no confirmation)
 //   manual     site needs an account (Workday etc.); not opened
 //   failed     error
+import * as G from "./grad.js";
 import * as Page from "./page.js";
 import { prepareJob, tailoredEntry } from "./tailor.js";
 
@@ -54,9 +55,12 @@ export async function runJob(job, ctx) {
       job = { ...job, company: job.company || meta.company, title: job.title || meta.role };
     }
 
-    // Fill profile fields first so only real questions remain.
+    // This job's graduation date (flexible window), then profile fields first
+    // so only real questions remain.
+    const existing = ctx.tailoredFor(job);
+    const profile = G.profileWithGrad(ctx.profile, existing ? existing.grad : G.gradForJob(ctx.profile, posting?.text, job.title)?.date);
     step("Filling");
-    const firstPass = await Page.autofill(tab, { profile: ctx.profile, resumeFile: null });
+    const firstPass = await Page.autofill(tab, { profile, resumeFile: null });
     const questions = await Page.collectQuestions(tab);
 
     // Tailor + answer (deterministic first, one AI call for the rest).
@@ -80,7 +84,7 @@ export async function runJob(job, ctx) {
 
     // Attach the resume (second pass also catches fields that appeared late).
     const file = await ctx.resumeFileFor(job, tailored);
-    const report = await Page.autofill(tab, { profile: ctx.profile, resumeFile: file });
+    const report = await Page.autofill(tab, { profile: G.profileWithGrad(ctx.profile, tailored ? tailored.grad : prep.grad), resumeFile: file });
     const toFill = prep.answers.filter((a) => a.answer);
     if (toFill.length) await Page.fillAnswers(tab, toFill);
     const attested = (await Page.callAll(tab, "checkAttestations")).reduce((a, b) => a + b, 0);
