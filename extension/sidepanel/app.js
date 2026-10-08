@@ -976,6 +976,7 @@ function autopilotCard() {
         { class: "row small", style: { margin: "8px 0 4px" } },
         Object.entries(counts).map(([k, n]) => h("span", { class: `pill ${STATUS_PILL[k] || ""}` }, `${STATUS_LABEL[k]} ${n}`)),
         h("span", { class: "spacer" }),
+        S.queue.some((i) => RETRYABLE.includes(i.status)) && h("button", { class: "btn ghost small", disabled: runningElsewhere(), onclick: () => tryAgain(S.queue.filter((i) => RETRYABLE.includes(i.status))) }, "Try all again"),
         !S.autopilotRunning && h("button", { class: "btn ghost small", onclick: () => ((S.queue = S.queue.filter((i) => !["applied", "manual", "failed", "ineligible"].includes(i.status))), saveQueue(), renderJobs()) }, "Clear finished")
       )
     );
@@ -983,6 +984,25 @@ function autopilotCard() {
     for (const it of [...S.queue].sort((a, b) => order[a.status] - order[b.status])) card.append(queueRow(it));
   }
   return card;
+}
+
+// Jobs worth another go: errors, blockers, and eligibility (your status may have changed).
+const RETRYABLE = ["failed", "needs-you", "ineligible"];
+const runningElsewhere = () => !S.autopilotRunning && S.queue.some((i) => i.status === "running");
+
+// Put jobs back in the queue and run them now (no new jobs are added).
+async function tryAgain(items) {
+  if (runningElsewhere()) return toast("Autopilot is running in its JobPilot tab. Try again when it finishes.", true);
+  for (const it of items) {
+    if (it.tabId) chrome.tabs.remove(it.tabId).catch(() => {});
+    Object.assign(it, { status: "queued", note: "", tabId: null, finishedAt: null });
+    // Move to the end so a run already in progress here picks it up.
+    S.queue = S.queue.filter((x) => x !== it);
+    S.queue.push(it);
+  }
+  await store.set("autopilotQueue", S.queue); // saved before a run tab loads it
+  renderJobs();
+  if (!S.autopilotRunning) await startAutopilot(0);
 }
 
 function queueRow(it) {
@@ -1016,26 +1036,25 @@ function queueRow(it) {
       h("span", { class: `pill ${STATUS_PILL[it.status] || ""}` }, it.status === "running" ? [spinner(), " "] : null, STATUS_LABEL[it.status])
     ),
     it.note ? h("div", { class: "small muted", style: { marginTop: "2px" } }, it.note) : null,
-    ["review", "needs-you", "manual", "failed"].includes(it.status)
+    ["review", "needs-you", "manual", "failed", "ineligible"].includes(it.status)
       ? h(
           "div",
           { class: "row", style: { marginTop: "4px" } },
+          RETRYABLE.includes(it.status) && h("button", { class: "btn small", disabled: runningElsewhere(), onclick: () => tryAgain([it]) }, "Try again"),
           h("button", { class: "btn ghost small", onclick: open }, it.tabId ? "Go to tab" : "Open"),
-          it.status !== "failed" && h("button", { class: "btn ghost small", onclick: markApplied }, "I submitted it"),
+          !["failed", "ineligible"].includes(it.status) && h("button", { class: "btn ghost small", onclick: markApplied }, "I submitted it"),
           h(
             "button",
             {
               class: "btn ghost small",
               onclick: () => {
-                if (it.status === "failed") {
-                  it.status = "queued";
-                  it.note = "";
-                } else S.queue = S.queue.filter((x) => x !== it);
+                if (it.tabId && it.status !== "review") chrome.tabs.remove(it.tabId).catch(() => {});
+                S.queue = S.queue.filter((x) => x !== it);
                 saveQueue();
                 renderJobs();
               },
             },
-            it.status === "failed" ? "Retry" : "Remove"
+            "Remove"
           )
         )
       : null
@@ -1050,8 +1069,10 @@ async function startAutopilot(n) {
   if (S.settings.autopilot.ownTab && !RUN_PARAM) {
     const url = chrome.runtime.getURL(`sidepanel/index.html?run=${n}`);
     const [open] = await chrome.tabs.query({ url: chrome.runtime.getURL("sidepanel/index.html*") });
-    if (open) return toast("Autopilot is already running in its JobPilot tab.");
-    await chrome.tabs.create({ url, pinned: true, active: false });
+    if (open && runningElsewhere()) return toast("Autopilot is already running in its JobPilot tab.");
+    // Reuse a finished run's tab, or open one.
+    if (open) await chrome.tabs.update(open.id, { url });
+    else await chrome.tabs.create({ url, pinned: true, active: false });
     return toast("Autopilot started in a pinned JobPilot tab. You can close this panel.");
   }
   const inQueue = new Set(S.queue.map((i) => i.job.key));
@@ -1060,7 +1081,7 @@ async function startAutopilot(n) {
     .slice(0, n)
     .map((j) => ({ id: j.key, job: jobFromListing(j), status: "queued", note: "" }));
   S.queue.push(...picks);
-  if (!S.queue.some((i) => i.status === "queued")) return toast("No new matching jobs to queue.");
+  if (!S.queue.some((i) => i.status === "queued")) return toast(n ? "No new matching jobs to queue." : "Nothing to run.");
   S.autopilotRunning = true;
   S.stopAutopilot = false;
   saveQueue();
@@ -2338,7 +2359,7 @@ async function init() {
     await store.set("autopilotStop", false);
     const jobs = await jobsPromise;
     if (!S.jobsCache.fetchedAt) S.jobsCache = withKeys(jobs);
-    startAutopilot(Number(RUN_PARAM) || 10);
+    startAutopilot(Number(RUN_PARAM));
   }
 
   // Follow a run in the other JobPilot page (panel <-> pinned tab).

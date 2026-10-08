@@ -91,6 +91,8 @@ For each job:
    - something is blocked (CAPTCHA, login, a missing required field),
    - or the site needs an account (Workday, iCIMS, Taleo, Amazon, Microsoft…): marked **Apply manually**.
 
+Jobs that failed, needed you, or were marked not eligible have a **Try again** button (and **Try all again** for the whole list): it closes the old tab and runs them again right away, re-checking eligibility in case you changed your work status.
+
 Settings → Autopilot: auto-submit on/off, jobs at once, a randomized pause between applications, running in its own tab, and background checks for new jobs.
 
 ## Speed and consistency
