@@ -7,6 +7,8 @@ export const DEFAULT_AUTOPILOT = {
   concurrency: 2, // jobs prepared at the same time
   refreshHours: 3, // background refresh of job sources; 0 = off
   notify: true,
+  ownTab: true, // run in a pinned JobPilot tab so closing the side panel doesn't stop it
+  pauseSec: 30, // average pause between applications (randomized), so runs look and pace like a person
 };
 
 export const DEFAULT_SETTINGS = {

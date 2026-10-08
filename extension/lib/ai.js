@@ -258,9 +258,10 @@ const JOB_SCHEMA = obj({
   graduation_window: obj({ earliest: str, latest: str }),
   cover_hook: str,
   cover_edits: arr(obj({ id: str, text: str })),
+  bank_matches: arr(obj({ qid: str, bank_id: str })),
 });
 
-const JOB_SYSTEM = `You help a student apply to one internship. Four tasks; any may come back empty.
+const JOB_SYSTEM = `You help a student apply to one internship. Five tasks; any may come back empty.
 
 1. bullet_edits: reword resume bullets so they use the posting's terminology where the SAME work truthfully fits. Only bullets that clearly improve; at most 6. Keep every number and fact; never add tools, skills, metrics or claims that aren't in the bullet or elsewhere in the resume; keep length similar (≤ ~110 characters); start with a strong past-tense verb; keep any **bold** markup. Use the given ids.
 
@@ -270,16 +271,22 @@ const JOB_SYSTEM = `You help a student apply to one internship. Four tasks; any 
 
 4. Cover letter, only when a <cover_letter> block is given (otherwise cover_hook "" and cover_edits []). The student wrote the letter; you only fill a gap and polish.
    cover_hook: ONE sentence (at most 30 words) for the {Hook} spot in their "why" paragraph, naming something specific and real from the posting (a product, problem, team or technology) that connects to what the student says they care about. Plain, concrete wording; no flattery ("I admire", "industry-leading", "passionate", "excited to leverage"), no claims about the student beyond their own paragraphs, no em dashes. It is pasted where {Hook} sits in their "why" paragraph, so it must read naturally there (e.g. after "What draws me to {Company}:" start with "you…" or "the…", not the company's name again). "" if the posting gives nothing specific.
-   cover_edits: optionally reword up to 2 of the given story paragraphs to use the posting's terms where the same work truthfully fits. Same rules as bullets: keep every fact and number, add no tools or skills, keep the student's voice and length. Omit paragraphs that are already fine.`;
+   cover_edits: optionally reword up to 2 of the given story paragraphs to use the posting's terms where the same work truthfully fits. Same rules as bullets: keep every fact and number, add no tools or skills, keep the student's voice and length. Omit paragraphs that are already fine.
+
+5. bank_matches, only when an <answer_bank> is given (otherwise []): the student wrote these answers themselves. For each question that one of them genuinely answers (same intent, even if worded differently, e.g. "What excites you about this role?" ~ "Why do you want to work at {Company}?"), return its qid and the bank_id. A matched question needs no answer in "answers" (return "" there). Don't match when the question asks for something the bank answer doesn't cover.`;
 
 // bullets: [{ id, text }]; questions: [{ qid, question, kind, options }]
-export async function rewriteAndAnswer(settings, { bullets, keywords, posting, questions, resumeText, profile, company, role, cover = null }) {
+// draftText: false = never write short_text/long_text answers (Autopilot);
+// those are only covered by your answer bank.
+export async function rewriteAndAnswer(settings, { bullets, keywords, posting, questions, resumeText, profile, company, role, cover = null, bank = [], draftText = true }) {
   if (!bullets.length && !questions.length && !cover) return { bullet_edits: [], answers: [] };
   const content = [
     `<job company="${company || ""}" role="${role || ""}">\n${posting}\n</job>`,
     keywords.length ? `<posting_keywords_the_resume_already_has>${keywords.join(", ")}</posting_keywords_the_resume_already_has>` : "",
     bullets.length ? `<bullets>\n${JSON.stringify(bullets)}\n</bullets>` : "",
     cover ? `<cover_letter>\n${JSON.stringify(cover)}\n</cover_letter>` : "",
+    !draftText && questions.length ? "Don't write answers for short_text or long_text questions: return \"\" for them. Only bank_matches may cover them." : "",
+    bank.length && questions.length ? `<answer_bank>\n${JSON.stringify(bank.map((b) => ({ bank_id: b.id, question: b.prompt, answer: b.text.slice(0, 600) })))}\n</answer_bank>` : "",
     questions.length ? `<resume>\n${resumeText}\n</resume>\n<profile>${JSON.stringify(profile)}</profile>\n<questions>\n${JSON.stringify(questions.map(({ qid, question, kind, options }) => ({ qid, question, kind, options })))}\n</questions>` : "",
   ]
     .filter(Boolean)

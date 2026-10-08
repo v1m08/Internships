@@ -77,19 +77,21 @@ Updates never touch your data. Your resume, profile and settings live in the bro
 
 ## Autopilot (auto-apply)
 
-**Jobs → Start Autopilot on the next N matching jobs.** It pulls jobs from every repo in **Settings → Job sources**, applies your **Filters** (role keywords, exclusions, locations, categories, age, sponsorship), and works through them a few at a time in background tabs:
+**Jobs → Start Autopilot on the next N matching jobs.** It pulls jobs from every repo in **Settings → Job sources**, applies your **Filters**, and works through them in background tabs. By default it runs in a pinned JobPilot tab, so you can close the side panel; you get a notification when it's done.
+
+For each job:
 
 1. Opens the posting and clicks through to the application form.
-2. Fills your profile fields and answers standard questions from your saved answers (authorization, sponsorship, "how did you hear", graduation, EEO and so on). No AI is used for these.
-3. Tailors your resume: skills and project order, keywords and one-page fit are computed without AI. Then **one** Claude call rewords bullets and answers whatever questions are left.
-4. Attaches the tailored PDF (named like `Your_Name_Resume_Company.pdf`).
-5. Decides what to do next:
-   - **Nothing had to be typed** (every field came from your profile or saved answers, or was a dropdown/radio choice): it **submits automatically** and checks for the site's confirmation.
-   - **Any typed answer was AI-written** (essays, short answers): the tab stays open as **Review & submit**, with drafts highlighted purple.
-   - **Blocked** (CAPTCHA, login, a missing required field): marked **Needs you**.
-   - **Account-based sites** (Workday, iCIMS, Taleo, Amazon, Microsoft…): marked **Apply manually**.
+2. On each page: fills what it can from your profile and saved answers (no AI), then one short Claude pass for fields that got stuck. Claude only *fills the form*: it picks the option that matches your profile (Degree "Bachelor's Degree"), chooses preference dropdowns, and fixes formats. It never writes answers.
+3. Text questions are answered only with **your own words**: saved answers, or **Settings → Your answers**, a bank of answers to common questions you write once. Claude recognizes when a differently-worded question asks the same thing ("What excites you about joining X?" ↔ "Why do you want to work at {Company}?") and uses your answer as written.
+4. Tailors your resume (and cover letter, if you wrote one) and attaches them.
+5. Clicks **Next/Continue** through multi-page forms (up to 6 pages), then **Submit**. If the site rejects a field ("enter a valid phone number"), Claude fixes the fact or format once and resubmits.
+6. Stops and leaves the tab for you when:
+   - a question needs **your own words** and none of your answers fit (add one to *Your answers* and it's covered next time),
+   - something is blocked (CAPTCHA, login, a missing required field),
+   - or the site needs an account (Workday, iCIMS, Taleo, Amazon, Microsoft…): marked **Apply manually**.
 
-Settings → Autopilot covers: auto-submit on/off, jobs at once, and background checks for new jobs (with notifications). There is no daily limit; the batch size you pick when starting Autopilot sets how many jobs it works through.
+Settings → Autopilot: auto-submit on/off, jobs at once, a randomized pause between applications, running in its own tab, and background checks for new jobs.
 
 ## Speed and consistency
 

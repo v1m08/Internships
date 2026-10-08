@@ -26,6 +26,7 @@ const S = {
   tailored: {}, // jobKey -> { company, role, url, resume, changeCount, keywords, missing, createdAt }
   applied: {}, // jobKey -> { company, title, url, date }
   cover: null, // your cover letter template (lib/cover.js)
+  bank: [], // your answer bank (lib/cover.js DEFAULT_BANK)
   jobsCache: { fetchedAt: 0, items: [] },
   tab: null,
   job: null, // { key, company, title, url, listingId? }
@@ -602,9 +603,16 @@ async function doDraftAnswers() {
         profile: profileForJob(),
         company: jobLabel().company,
         role: jobLabel().role,
+        bank: S.bank.filter((b) => b.text.trim()),
       });
       const byId = Object.fromEntries((out.answers || []).map((a) => [a.qid, a.answer]));
+      const bankById = Object.fromEntries(S.bank.map((b) => [b.id, b]));
+      const banked = Object.fromEntries((out.bank_matches || []).filter((m) => bankById[m.bank_id]?.text.trim()).map((m) => [m.qid, C.fillVars(bankById[m.bank_id].text, jobLabel())]));
       for (const q of pending) {
+        if (banked[q.qid] && /text/.test(q.kind)) {
+          results.push({ ...q, answer: banked[q.qid], source: "bank", mark: "filled", note: "your answer from Settings → Your answers" });
+          continue;
+        }
         let ans = (byId[q.qid] || "").trim();
         if (q.options?.length) ans = Ans.matchOption(q.options, ans) || "";
         results.push({ ...q, answer: ans, source: ans ? "ai" : "none" });
@@ -613,7 +621,7 @@ async function doDraftAnswers() {
     S.answers = results;
     const n = await Page.fillAnswers(S.tab, results.filter((a) => a.answer));
     const fromRules = results.filter((a) => a.answer && a.source !== "ai").length;
-    toast(`Filled ${n} answer${n === 1 ? "" : "s"} (${fromRules} from your profile/saved answers). Review AI drafts before submitting.`);
+    toast(`Filled ${n} answer${n === 1 ? "" : "s"} (${fromRules} from your profile, saved answers or Your answers). Review AI drafts (purple) before submitting.`);
   });
 }
 
@@ -843,7 +851,7 @@ function autopilotCard() {
       "p",
       { class: "small muted" },
       `Prepares ${ap.concurrency} applications at a time in background tabs: tailored resume, filled form, answers. `,
-      ap.autoSubmit ? "Submits automatically when nothing had to be written; anything with a typed answer waits for you." : "Auto-submit is off: every application waits for you to submit."
+      ap.autoSubmit ? "Submits when every answer came from your profile or your own saved answers. Claude only fills forms (options, formats, matching your answers); it never writes answers here, so questions that need your words wait for you." : "Auto-submit is off: every application waits for you to submit."
     )
   );
 
@@ -863,6 +871,17 @@ function autopilotCard() {
     );
   } else {
     card.append(h("button", { class: "btn", onclick: () => ((S.stopAutopilot = true), toast("Stopping after the current jobs…")) }, "Stop"));
+  }
+  // Running in the pinned JobPilot tab: this panel only shows progress.
+  if (!S.autopilotRunning && S.queue.some((i) => i.status === "running")) {
+    card.append(
+      h(
+        "div",
+        { class: "row", style: { marginTop: "6px" } },
+        h("span", { class: "pill info" }, spinner(), " running in the JobPilot tab"),
+        h("button", { class: "btn ghost small", onclick: () => (store.set("autopilotStop", true), toast("Stopping after the current jobs…")) }, "Stop")
+      )
+    );
   }
 
   if (S.queue.length) {
@@ -938,7 +957,18 @@ function queueRow(it) {
   );
 }
 
+// Inside the side panel: hand the run to a pinned JobPilot tab (setting), so
+// closing the panel doesn't stop it. The panel follows along via storage.
+const RUN_PARAM = new URLSearchParams(location.search).get("run");
+
 async function startAutopilot(n) {
+  if (S.settings.autopilot.ownTab && !RUN_PARAM) {
+    const url = chrome.runtime.getURL(`sidepanel/index.html?run=${n}`);
+    const [open] = await chrome.tabs.query({ url: chrome.runtime.getURL("sidepanel/index.html*") });
+    if (open) return toast("Autopilot is already running in its JobPilot tab.");
+    await chrome.tabs.create({ url, pinned: true, active: false });
+    return toast("Autopilot started in a pinned JobPilot tab. You can close this panel.");
+  }
   const inQueue = new Set(S.queue.map((i) => i.job.key));
   const picks = filteredJobs()
     .filter((j) => !S.applied[j.key] && !inQueue.has(j.key))
@@ -968,6 +998,7 @@ async function startAutopilot(n) {
     },
     // Autopilot letters are only your own paragraphs (no Claude sentence).
     cover: S.cover,
+    bank: S.bank,
     coverFileFor: async (job, t) => {
       if (!t?.cover || S.settings.coverAttach === "off") return null;
       const name = R.fileNameFor(S.settings.fileNamePattern, t.resume || S.base, S.profile, t.company || job.company, t.role || job.title).replace(/Resume/i, "Cover_Letter");
@@ -980,6 +1011,7 @@ async function startAutopilot(n) {
   try {
     await Autopilot.runQueue(S.queue, ctx, {
       concurrency: S.settings.autopilot.concurrency,
+      pauseSec: S.settings.autopilot.pauseSec ?? 30,
       shouldStop: () => S.stopAutopilot,
       onUpdate: (item) => {
         if (item.status === "applied" && !S.applied[item.job.key]) {
@@ -995,7 +1027,9 @@ async function startAutopilot(n) {
     await store.set("autopilotQueue", S.queue);
     renderJobs();
     const c = S.queue.reduce((m, i) => ((m[i.status] = (m[i.status] || 0) + 1), m), {});
-    toast(`Autopilot done: ${c.applied || 0} submitted, ${c.review || 0} to review, ${c["needs-you"] || 0} need you.`);
+    const summary = `${c.applied || 0} submitted, ${c.review || 0} to review, ${c["needs-you"] || 0} need you.`;
+    toast(`Autopilot done: ${summary}`);
+    chrome.notifications?.create(`autopilot-${Date.now()}`, { type: "basic", iconUrl: "../icons/icon128.png", title: "JobPilot Autopilot finished", message: summary, priority: 1 });
   }
 }
 
@@ -1588,6 +1622,39 @@ function coverCard() {
   );
 }
 
+// ------------------------------------------------------- answer bank
+
+const saveBank = debounce(() => store.set("answerBank", S.bank), 400);
+
+function bankCard() {
+  const written = S.bank.filter((b) => b.text.trim()).length;
+  const rerender = () => (saveBank(), renderSettings());
+  return h(
+    "details",
+    { class: "card", open: S.bankOpen ?? false, ontoggle: (e) => (S.bankOpen = e.target.open) },
+    h("summary", {}, h("strong", {}, "Your answers"), h("span", { class: "small muted" }, ` (${written} written)`)),
+    h(
+      "p",
+      { class: "small muted" },
+      "Answer the questions applications ask most, once, in your own words. When a form asks the same thing, even worded differently, Claude matches it and your answer is used as written ({Company} and {Role} filled in). These count as your words, so Autopilot can submit them; questions nobody answered here wait for your review."
+    ),
+    S.bank.map((b, i) =>
+      h(
+        "div",
+        { class: "entry" },
+        h(
+          "div",
+          { class: "head" },
+          h("input", { type: "text", value: b.prompt, placeholder: "Question", oninput: (e) => ((b.prompt = e.target.value), saveBank()) }),
+          h("button", { class: "icon", title: "Delete", onclick: () => (S.bank.splice(i, 1), rerender()) }, "✕")
+        ),
+        textarea({ rows: 3, value: b.text, placeholder: "Your answer, 3–6 sentences. Specific beats polished.", oninput: (e) => ((b.text = e.target.value), saveBank()) })
+      )
+    ),
+    h("button", { class: "btn small", style: { marginTop: "6px" }, onclick: () => (S.bank.push({ id: R.uid("bank"), prompt: "", text: "" }), rerender()) }, "+ Question")
+  );
+}
+
 // ---------------------------------------------------------- SETTINGS tab
 
 const YES_NO = [
@@ -1937,10 +2004,18 @@ function renderSettings() {
     "div",
     { class: "card" },
     h("h3", {}, "Autopilot"),
-    apBool("autoSubmit", "Submit automatically when no answer had to be typed (typed answers always wait for me)"),
+    apBool("autoSubmit", "Submit automatically when every answer came from my profile or my own saved answers"),
     apBool("tailor", "Tailor the resume for each job"),
     apBool("notify", "Notify me about new matching jobs"),
     apNum("concurrency", "Jobs at once", [1, 2, 3, 4].map((n) => [n, String(n)])),
+    apNum("pauseSec", "Pause between applications (randomized)", [
+      [0, "None"],
+      [15, "About 15 seconds"],
+      [30, "About 30 seconds"],
+      [60, "About a minute"],
+      [180, "About 3 minutes"],
+    ]),
+    apBool("ownTab", "Run in a pinned JobPilot tab, so I can close the side panel"),
     apNum("refreshHours", "Check repos for new jobs", [
       [0, "Off"],
       [1, "Every hour"],
@@ -2030,7 +2105,7 @@ function renderSettings() {
     )
   );
 
-  el.replaceChildren(aiCard, profileCard, answersCard, autopilotCard, sourceCard, filesCard, updatesCard, dataCard);
+  el.replaceChildren(aiCard, profileCard, answersCard, bankCard(), autopilotCard, sourceCard, filesCard, updatesCard, dataCard);
 }
 
 function hr() {
@@ -2088,7 +2163,7 @@ function renderUpdateBanner(status) {
 async function init() {
   // The 5k-job cache is big: show the panel first, load it right after.
   const jobsPromise = Jobs.getJobs();
-  const [settings, profile, base, resumePdf, tailored, applied, cover] = await Promise.all([
+  const [settings, profile, base, resumePdf, tailored, applied, cover, bank] = await Promise.all([
     store.getSettings(),
     store.getProfile(),
     store.get("resume", null),
@@ -2096,8 +2171,9 @@ async function init() {
     store.get("tailored", {}),
     store.get("applied", {}),
     store.get("coverLetter", null),
-  ]).then((r) => ((r[6] = { ...C.DEFAULT_COVER, ...(r[6] || {}) }), r));
-  Object.assign(S, { settings, profile, base, resumePdf, tailored, applied, cover });
+    store.get("answerBank", null),
+  ]).then((r) => ((r[6] = { ...C.DEFAULT_COVER, ...(r[6] || {}) }), (r[7] = r[7] || C.DEFAULT_BANK.map((b) => ({ ...b }))), r));
+  Object.assign(S, { settings, profile, base, resumePdf, tailored, applied, cover, bank });
   jobsPromise.then((jobsCache) => {
     S.jobsLoaded = true;
     if (!S.jobsCache.fetchedAt || jobsCache.fetchedAt > S.jobsCache.fetchedAt) S.jobsCache = withKeys(jobsCache);
@@ -2133,6 +2209,28 @@ async function init() {
     renderUpdateBanner(last);
     if (Update.isStale(last)) Update.checkForUpdate(settings).then(renderUpdateBanner).catch(() => {});
   }
+
+  // Autopilot running in a pinned tab: start it here once jobs are loaded.
+  if (RUN_PARAM) {
+    document.title = "JobPilot Autopilot";
+    S.activeTab = "jobs";
+    switchTab("jobs");
+    await store.set("autopilotStop", false);
+    const jobs = await jobsPromise;
+    if (!S.jobsCache.fetchedAt) S.jobsCache = withKeys(jobs);
+    startAutopilot(Number(RUN_PARAM) || 10);
+  }
+
+  // Follow a run in the other JobPilot page (panel <-> pinned tab).
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    if (changes.autopilotStop?.newValue && S.autopilotRunning) S.stopAutopilot = true;
+    if (changes.autopilotQueue && !S.autopilotRunning) {
+      S.queue = changes.autopilotQueue.newValue || [];
+      if (S.activeTab === "jobs") renderJobs();
+    }
+    if (changes.applied && !S.autopilotRunning) S.applied = changes.applied.newValue || {};
+  });
 }
 
 init();

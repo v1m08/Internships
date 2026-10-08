@@ -839,8 +839,44 @@
     return n;
   }
 
+  const SUBMIT_RE = /^(submit|submit application|submit my application|send application|apply|apply now|finish|complete application)$/i;
+  const NEXT_RE = /^(next|continue|next step|next page|save (and|&) continue|save (and|&) next|proceed|continue to (the )?next step)$/i;
+
+  // Multi-page forms: is this the last page, and how to move on.
+  function pageNav() {
+    const btns = [...document.querySelectorAll('button, input[type="submit"], [role="button"], a[role="button"]')].filter((b) => visibleEl(b) && !b.disabled);
+    return { submit: btns.some((b) => SUBMIT_RE.test(clickableText(b))), next: btns.some((b) => NEXT_RE.test(clickableText(b))) };
+  }
+
+  function clickNext() {
+    const btn = [...document.querySelectorAll('button, input[type="submit"], [role="button"], a[role="button"]')].find((b) => visibleEl(b) && !b.disabled && NEXT_RE.test(clickableText(b)));
+    if (!btn) return { clicked: false };
+    btn.click();
+    return { clicked: true, text: clickableText(btn) };
+  }
+
+  // Fields the site rejected after Submit, with its error text, tagged so
+  // fillAnswers can fix them: [{ qid, question, kind, options, error, value }]
+  async function invalidFields() {
+    const out = [];
+    let n = 0;
+    for (const el of controls()) {
+      if (el.type === "file" || el.type === "checkbox" || el.type === "radio") continue;
+      const box = el.closest('[class*="field" i], [class*="question" i], [class*="input" i], li, fieldset') || el.parentElement;
+      const errEl = box && [...box.querySelectorAll('[class*="error" i], [role="alert"], [aria-live="assertive"]')].find((x) => visibleEl(x) && clean(x.innerText).length > 2 && clean(x.innerText).length < 200);
+      const invalid = el.getAttribute("aria-invalid") === "true" || (el.validity && !el.validity.valid) || !!errEl;
+      if (!invalid) continue;
+      const label = labelFor(el);
+      const qid = `fix:${location.host}${location.pathname}#${n++}`;
+      el.setAttribute(QID_ATTR, qid);
+      const options = el instanceof HTMLSelectElement ? [...el.options].map((o) => clean(o.textContent)).filter(Boolean) : isCombobox(el) ? el.__jpOptions || (await comboOptions(el)) : [];
+      out.push({ qid, question: label.slice(0, 300), kind: el instanceof HTMLTextAreaElement ? "long_text" : options.length ? "dropdown" : el.type === "number" ? "number" : "short_text", options: options.slice(0, 80), error: clean(errEl?.innerText || el.validationMessage || "invalid"), value: String(el.value || "").slice(0, 200), required: isRequired(el, label) });
+    }
+    return out;
+  }
+
   function submit() {
-    const re = /^(submit|submit application|submit my application|send application|apply|apply now|finish|complete application)$/i;
+    const re = SUBMIT_RE;
     const forms = [...document.querySelectorAll("form")].filter((f) => f.querySelector("input, textarea, select"));
     for (const root of forms.length ? forms : [document]) {
       const btns = [...root.querySelectorAll('button, input[type="submit"], [role="button"]')].filter((b) => visibleEl(b) && !b.disabled);
@@ -878,6 +914,9 @@
     checkAttestations,
     submit,
     submissionState,
+    pageNav,
+    clickNext,
+    invalidFields,
     _labelFor: labelFor,
     _classify: classify,
   };

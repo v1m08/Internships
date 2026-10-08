@@ -40,3 +40,23 @@ export async function resolveStuck(tab, { settings, profile, resumeText, posting
   if (toFill.length) await Page.fillAnswers(tab, toFill);
   return result;
 }
+
+// After Submit: fields the site rejected ("Enter a valid phone number").
+// Claude reads the error and the current value and fixes facts or formats;
+// it never writes your own-words answers here either. -> number fixed
+export async function fixInvalid(tab, { settings, profile, resumeText, posting = "" }) {
+  const lists = await Page.callAll(tab, "invalidFields");
+  const bad = lists.flat().filter((q) => q.kind !== "long_text");
+  if (!bad.length) return 0;
+  const fields = bad.map((q) => ({ ...q, question: `${q.question} (the site says: "${q.error}"; current value: "${q.value}")` }));
+  const answers = await resolveFields(settings, { fields, profile, resumeText, posting });
+  const byId = Object.fromEntries(bad.map((q) => [q.qid, q]));
+  const toFill = [];
+  for (const a of answers) {
+    const q = byId[a.qid];
+    const values = (a.answer || []).map((v) => String(v).trim()).filter(Boolean);
+    if (!q || !values.length || a.basis === "writing" || a.basis === "unknown") continue;
+    toFill.push({ qid: q.qid, answer: q.kind === "dropdown" ? values : values[0], mark: a.basis === "fact" ? "filled" : "draft", note: `fixed after the site said: ${q.error}` });
+  }
+  return toFill.length ? Page.fillAnswers(tab, toFill) : 0;
+}

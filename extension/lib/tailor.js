@@ -41,12 +41,16 @@ function fitOnePage(resume, weights) {
  * opts: { settings, base, posting: {text,url}, job: {company,title}, profile,
  *         savedAnswers, questions = [], useAI = true, autopilot = false, cover }
  *   cover: your cover letter template (cover.js), if you've written one
+ *   bank: your answer bank [{ id, prompt, text }] — answers you wrote once,
+ *         reused when Claude says a question asks the same thing
+ *   answersOnly: later pages of a multi-page form (no resume/letter work)
  * Returns { company, role, keywords, missing, changes, answers, aiUsed }
  *   answers: [{ qid, answer, source: "rule"|"saved"|"ai", kind, required }]
  */
 export async function prepareJob(opts) {
-  const { settings, base, posting, job = {}, profile, savedAnswers = {}, questions = [], useAI = true, autopilot = false, cover = null } = opts;
-  const coverOn = C.coverReady(cover);
+  const { settings, base, posting, job = {}, profile, savedAnswers = {}, questions = [], useAI = true, autopilot = false, cover = null, bank = [], answersOnly = false } = opts;
+  const coverOn = !answersOnly && C.coverReady(cover);
+  const bankReady = bank.filter((b) => (b.text || "").trim());
   const text = posting?.text || "";
   await loadFonts(); // page-fit checks need the real font metrics
   const resumeText = resumeToText(base);
@@ -75,7 +79,7 @@ export async function prepareJob(opts) {
 
   // One AI call: bullet rewrites (only if the posting shares skills with the resume) + remaining questions.
   let aiUsed = false;
-  const bullets = keywords.length ? rewriteCandidates(base).map(({ id, text }) => ({ id, text })) : [];
+  const bullets = keywords.length && !answersOnly ? rewriteCandidates(base).map(({ id, text }) => ({ id, text })) : [];
   // Cover letter: your paragraphs that fit this posting; Claude may add one
   // sentence where you put {Hook} and polish those paragraphs. Not in
   // Autopilot, which submits without your review.
@@ -96,7 +100,13 @@ export async function prepareJob(opts) {
       company: job.company,
       role: job.title,
       cover: coverAsk,
+      bank: pending.some((q) => /text/.test(q.kind)) ? bankReady : [],
+      draftText: !autopilot,
     });
+    // Your own answers from the bank, for questions Claude says they fit.
+    const bankById = Object.fromEntries(bankReady.map((b) => [b.id, b]));
+    const banked = {};
+    for (const m of out.bank_matches || []) if (bankById[m.bank_id]) banked[m.qid] = C.fillVars(bankById[m.bank_id].text, { company: job.company, role: job.title });
     if (coverAsk) {
       const hook = (out.cover_hook || "").trim();
       if (coverAsk.why && C.validHook(hook, text, cover)) {
@@ -132,6 +142,16 @@ export async function prepareJob(opts) {
     }
     const aiAnswers = Object.fromEntries((out.answers || []).map((a) => [a.qid, a.answer]));
     for (const q of pending) {
+      if (banked[q.qid] && /text/.test(q.kind)) {
+        answers.push({ ...q, answer: banked[q.qid], source: "bank", mark: "filled", note: "your answer from Settings → Your answers" });
+        continue;
+      }
+      // Autopilot never submits Claude's writing: text answers come only from
+      // your profile, saved answers or answer bank.
+      if (autopilot && /text/.test(q.kind)) {
+        answers.push({ ...q, answer: "", source: "needs-words" });
+        continue;
+      }
       let ans = (aiAnswers[q.qid] || "").trim();
       if (q.options?.length) ans = A.matchOption(q.options, ans) || "";
       answers.push({ ...q, answer: ans, source: ans ? "ai" : "none" });
@@ -157,6 +177,7 @@ export async function prepareJob(opts) {
 
   // Fit to one page deterministically.
   const draft = R.applyChanges(base, changes);
+  if (answersOnly) return { company: job.company || "", role: job.title || "", keywords, missing: [], changes: [], answers, aiUsed, grad: null, coverTemplate: null };
   for (const id of fitOnePage(draft, weights)) {
     const b = rewriteCandidates(base).find((x) => x.id === id) || { text: "", where: "" };
     changes.push({ id: R.uid("c"), type: "hide", target: id, where: b.where, before: b.text, after: "(hidden to fit one page)", reason: "Least related to this posting", accepted: true });

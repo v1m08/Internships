@@ -61,6 +61,21 @@ const fillIn = (text, vars) =>
     .replace(/[ \t]{2,}/g, " ")
     .trim();
 
+// Answer bank: common application questions you answer once. Claude matches
+// differently-worded questions to these; your text is used as written.
+export const DEFAULT_BANK = [
+  "Why do you want to work at {Company}?",
+  "Why are you interested in this role?",
+  "Tell us about a project you're proud of.",
+  "Describe a challenge you faced and how you handled it.",
+  "Tell us about yourself.",
+  "What do you hope to learn from this internship?",
+  "What are your career goals?",
+].map((prompt, i) => ({ id: `bank${i}`, prompt, text: "" }));
+
+// {Company}/{Role} in any text you wrote (answer bank uses this too).
+export const fillVars = (text, { company, role }) => fillIn(text, { Company: company || "your company", Role: role || "this role", Hook: "" });
+
 // -> { paragraphs: [greeting, ...body], signoff } for one job.
 // picks: story ids in order; hook: Claude's sentence or ""; edits: { storyId: text }
 export function buildLetter(c, { company, role, picks, hook = "", edits = {} }) {
