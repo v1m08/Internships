@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JobPilot</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="../vendor/jspdf.umd.min.js"></script>
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><img src="../icons/icon32.png" alt="" width="20" height="20" /> JobPilot</div>
+      <nav class="tabs" role="tablist">
+        <button role="tab" data-tab="apply" class="active">Apply</button>
+        <button role="tab" data-tab="jobs">Jobs</button>
+        <button role="tab" data-tab="resume">Resume</button>
+        <button role="tab" data-tab="settings">Settings</button>
+      </nav>
+    </header>
+    <main>
+      <section id="tab-apply" class="panel active"></section>
+      <section id="tab-jobs" class="panel"></section>
+      <section id="tab-resume" class="panel"></section>
+      <section id="tab-settings" class="panel"></section>
+    </main>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

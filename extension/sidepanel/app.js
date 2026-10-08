@@ -1,0 +1,1601 @@
+import * as store from "../lib/store.js";
+import * as R from "../lib/resume.js";
+import * as AI from "../lib/ai.js";
+import { renderResume, resumeToText, loadFonts } from "../lib/pdf.js";
+import { buildResumePdf, latexStatus, resetLatexStatus } from "../lib/render.js";
+import { resumeToLatex } from "../lib/latex.js";
+import * as Jobs from "../lib/jobs.js";
+import * as Page from "../lib/page.js";
+import * as Update from "../lib/update.js";
+
+// ------------------------------------------------------------------ state
+
+const S = {
+  settings: null,
+  profile: null,
+  base: null, // resume model
+  resumePdf: null, // { name, base64 } originally uploaded file
+  tailored: {}, // jobKey -> { company, role, url, resume, changeCount, keywords, missing, createdAt }
+  applied: {}, // jobKey -> { company, title, url, date }
+  jobsCache: { fetchedAt: 0, items: [] },
+  tab: null,
+  job: null, // { key, company, title, url, listingId? }
+  posting: {}, // jobKey -> posting text, cached for the session
+  pending: null, // tailoring review in progress
+  report: null,
+  answers: null,
+  busy: {},
+  editing: "base",
+  jobsQuery: "",
+  jobsCategory: "",
+  hideApplied: true,
+  jobsShown: 50,
+  activeTab: "apply",
+};
+
+// ---------------------------------------------------------------- helpers
+
+const $ = (sel) => document.querySelector(sel);
+
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2).toLowerCase(), v);
+    else if (k === "class") el.className = v;
+    else if (k === "style" && typeof v === "object") Object.assign(el.style, v);
+    else if (k === "value") el.value = v;
+    else if (k === "checked") el.checked = !!v;
+    else if (k === "html") el.innerHTML = v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of children.flat(Infinity)) {
+    if (c === null || c === undefined || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+
+let toastTimer;
+function toast(msg, isError = false) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = `toast show${isError ? " error" : ""}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.className = "toast"), isError ? 6000 : 3000);
+}
+
+function debounce(fn, ms) {
+  let t;
+  return (...a) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...a), ms);
+  };
+}
+
+async function withBusy(name, fn, rerender = renderApply) {
+  if (S.busy[name]) return;
+  S.busy[name] = true;
+  rerender();
+  try {
+    await fn();
+  } catch (e) {
+    console.error(e);
+    toast(e.message || String(e), true);
+  } finally {
+    S.busy[name] = false;
+    rerender();
+  }
+}
+
+const spinner = () => h("span", { class: "spinner" });
+
+// AI is usable via an API key or the Claude Code bridge.
+const aiReady = () => S.settings.provider === "claude-code" || !!S.settings.apiKey;
+
+function hasContent(r) {
+  return !!(r && (r.basics?.name || r.sections?.length));
+}
+
+function autoGrow(el) {
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight + 2}px`;
+}
+
+function textarea(attrs) {
+  const el = h("textarea", { rows: 1, ...attrs });
+  el.addEventListener("input", () => autoGrow(el));
+  requestAnimationFrame(() => autoGrow(el));
+  return el;
+}
+
+const saveBase = debounce(() => store.set("resume", S.base), 400);
+const saveTailored = debounce(() => store.set("tailored", S.tailored), 400);
+const saveProfile = debounce(() => store.set("profile", S.profile), 400);
+const saveSettings = debounce(() => store.set("settings", S.settings), 400);
+
+function downloadBase64(base64, filename, mime = "application/pdf") {
+  return chrome.downloads.download({
+    url: `data:${mime};base64,${base64}`,
+    filename: `Resumes/${filename}`,
+    conflictAction: "overwrite",
+    saveAs: false,
+  });
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result).split(",")[1]);
+    fr.onerror = () => reject(fr.error);
+    fr.readAsDataURL(file);
+  });
+}
+
+function switchTab(name) {
+  S.activeTab = name;
+  document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${name}`));
+  render();
+}
+
+function render() {
+  if (S.activeTab === "apply") renderApply();
+  if (S.activeTab === "jobs") renderJobs();
+  if (S.activeTab === "resume") renderResumeTab();
+  if (S.activeTab === "settings") renderSettings();
+}
+
+// --------------------------------------------------------- job context
+
+function jobFromListing(l) {
+  return { key: Jobs.jobKeyForUrl(l.url), listingId: l.id, company: l.company, title: l.title, url: l.url, locations: l.locations };
+}
+
+async function refreshContext() {
+  const tab = await Page.activeTab();
+  S.tab = tab;
+  let job = tab ? await store.getTabJob(tab.id) : null;
+  if (!job && tab?.url && /^https?:/.test(tab.url)) {
+    const key = Jobs.jobKeyForUrl(tab.url);
+    const hit = S.jobsCache.items.find((j) => Jobs.jobKeyForUrl(j.url) === key);
+    job = hit ? jobFromListing(hit) : { key, company: "", title: "", url: tab.url, adhoc: true };
+  }
+  if (!job || !tab || !/^https?:/.test(tab.url || "")) job = null;
+  if (job?.key !== S.job?.key) {
+    S.pending = null;
+    S.report = null;
+    S.answers = null;
+  }
+  S.job = job;
+  if (S.activeTab === "apply") renderApply();
+}
+
+function currentTailored() {
+  return S.job ? S.tailored[S.job.key] : null;
+}
+
+function jobLabel() {
+  const t = currentTailored();
+  const company = t?.company || S.job?.company || "";
+  const role = t?.role || S.job?.title || "";
+  return { company, role };
+}
+
+// File name for the current job's resume.
+function resumeNameForJob() {
+  const t = currentTailored();
+  const { company, role } = jobLabel();
+  return R.fileNameFor(S.settings.fileNamePattern, t?.resume || S.base, S.profile, company, role);
+}
+
+// The PDF that gets attached/downloaded for the current job.
+async function resumeFileForJob() {
+  const t = currentTailored();
+  const name = resumeNameForJob();
+  if (t) return { name, ...(await buildResumePdf(t.resume, S.settings)), kind: "tailored" };
+  if (S.settings.attachWhenUntailored === "original" && S.resumePdf) return { name, base64: S.resumePdf.base64, kind: "original" };
+  if (hasContent(S.base)) return { name, ...(await buildResumePdf(S.base, S.settings)), kind: "base" };
+  if (S.resumePdf) return { name, base64: S.resumePdf.base64, kind: "original" };
+  return null;
+}
+
+function base64ToBlobUrl(base64, type = "application/pdf") {
+  const bin = atob(base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return URL.createObjectURL(new Blob([bytes], { type }));
+}
+
+async function previewResume(resume) {
+  const pdf = await buildResumePdf(resume, S.settings);
+  chrome.tabs.create({ url: base64ToBlobUrl(pdf.base64) });
+}
+
+function downloadTex(resume, pdfName) {
+  const tex = resumeToLatex(resume);
+  const b64 = btoa(unescape(encodeURIComponent(tex)));
+  return chrome.downloads.download({ url: `data:text/x-tex;base64,${b64}`, filename: `Resumes/${pdfName.replace(/\.pdf$/, ".tex")}`, conflictAction: "overwrite", saveAs: false });
+}
+
+// Opens the .tex as a new Overleaf project (Overleaf's documented /docs endpoint).
+function openInOverleaf(resume) {
+  const form = h("form", { method: "POST", action: "https://www.overleaf.com/docs", target: "_blank", style: { display: "none" } }, h("input", { type: "hidden", name: "encoded_snip", value: encodeURIComponent(resumeToLatex(resume)) }), h("input", { type: "hidden", name: "snip_name", value: "resume.tex" }), h("input", { type: "hidden", name: "engine", value: "pdflatex" }));
+  document.body.append(form);
+  form.submit();
+  form.remove();
+}
+
+// ------------------------------------------------------------- APPLY tab
+
+function renderApply() {
+  const el = $("#tab-apply");
+  const parts = [];
+  const hasKey = aiReady();
+  const hasResume = hasContent(S.base) || !!S.resumePdf;
+  const hasProfile = !!(S.profile.email && S.profile.firstName);
+
+  const aiOk = S.settings.aiVerified || (S.settings.provider === "api" && !!S.settings.apiKey);
+  if (!aiOk || !hasResume || !hasProfile) {
+    const item = (done, text, action, tab) =>
+      h(
+        "div",
+        { class: "row", style: { margin: "4px 0" } },
+        h("span", { class: `pill ${done ? "good" : "warn"}` }, done ? "Done" : "To do"),
+        h("span", { class: "spacer" }, text),
+        !done && h("button", { class: "btn", onclick: () => switchTab(tab) }, action)
+      );
+    parts.push(
+      h(
+        "div",
+        { class: "card" },
+        h("h3", {}, "Get set up (2 minutes)"),
+        item(aiOk, "Connect Claude", "Connect", "settings"),
+        item(hasResume, "Upload your resume", "Upload", "resume"),
+        item(hasProfile, "Check your application profile", "Open", "settings")
+      )
+    );
+  }
+
+  if (!S.job) {
+    parts.push(
+      h(
+        "div",
+        { class: "card" },
+        h("h3", {}, "No job page open"),
+        h("p", { class: "muted" }, "Open a job posting or application page in this tab, or pick one from the Jobs tab."),
+        h("button", { class: "btn primary", onclick: () => switchTab("jobs") }, "Browse jobs")
+      )
+    );
+    el.replaceChildren(...parts);
+    return;
+  }
+
+  const { company, role } = jobLabel();
+  const applied = S.applied[S.job.key];
+  let host = "";
+  try {
+    host = new URL(S.tab.url).hostname;
+  } catch {}
+  parts.push(
+    h(
+      "div",
+      { class: "card" },
+      h("div", { class: "row" }, h("strong", { style: { fontSize: "14px" } }, company || "This page"), h("span", { class: "spacer" }), applied && h("span", { class: "pill good" }, "Applied")),
+      h("div", {}, role || S.tab.title || ""),
+      h("div", { class: "muted small" }, host)
+    )
+  );
+
+  parts.push(tailorCard(hasKey, hasResume));
+  parts.push(fillCard(hasResume));
+  parts.push(questionsCard(hasKey));
+  parts.push(finishCard(applied));
+  el.replaceChildren(...parts);
+}
+
+function tailorCard(hasKey) {
+  const t = currentTailored();
+  const card = h("div", { class: "card" }, h("h3", {}, h("span", { class: "step" }, "1"), "Tailor your resume"));
+
+  if (S.busy.tailor) {
+    card.append(h("p", {}, spinner(), " Reading the posting and tailoring your resume… (20–60s)"));
+    return card;
+  }
+
+  if (S.pending) {
+    const p = S.pending;
+    const accepted = p.changes.filter((c) => c.accepted).length;
+    card.append(
+      h("div", { class: "grid2" }, h("label", { class: "field" }, h("span", {}, "Company"), h("input", { type: "text", value: p.company, oninput: (e) => (p.company = e.target.value) })), h("label", { class: "field" }, h("span", {}, "Role"), h("input", { type: "text", value: p.role, oninput: (e) => (p.role = e.target.value) }))),
+      p.keywords?.length ? h("div", { class: "small muted" }, "Keywords in this posting") : null,
+      h("div", { class: "chips" }, (p.keywords || []).map((k) => h("span", { class: "pill good" }, k))),
+      p.missing?.length ? h("div", { class: "small muted", style: { marginTop: "6px" } }, "Not on your resume. Add only if you really have them:") : null,
+      h("div", { class: "chips" }, (p.missing || []).map((k) => h("span", { class: "pill warn" }, k))),
+      h("div", { class: "small muted", style: { marginTop: "8px" } }, p.changes.length ? `${p.changes.length} suggested changes. Untick any you don't want:` : "Your resume already matches this posting well. No changes suggested.")
+    );
+    for (const c of p.changes) {
+      card.append(
+        h(
+          "div",
+          { class: `change${c.accepted ? "" : " off"}` },
+          h(
+            "label",
+            {},
+            h("input", {
+              type: "checkbox",
+              checked: c.accepted,
+              onchange: (e) => {
+                c.accepted = e.target.checked;
+                renderApply();
+              },
+            }),
+            h(
+              "div",
+              {},
+              h("div", { class: "where" }, { bullet: "Bullet", line: "Skills", hide: "Hide bullet", order: "Reorder", summary: "Summary" }[c.type], " · ", c.where),
+              h("div", { class: "before" }, c.before),
+              h("div", { class: "after" }, c.after),
+              c.reason && h("div", { class: "reason" }, c.reason)
+            )
+          )
+        )
+      );
+    }
+    card.append(
+      h(
+        "div",
+        { class: "row end", style: { marginTop: "10px" } },
+        h("button", { class: "btn ghost", onclick: () => ((S.pending = null), renderApply()) }, "Cancel"),
+        h("button", { class: "btn primary", onclick: acceptTailoring }, accepted ? `Use ${accepted} change${accepted === 1 ? "" : "s"}` : "Use resume as is")
+      )
+    );
+    return card;
+  }
+
+  if (t) {
+    card.append(
+      h("div", { class: "notice good" }, `Tailored for ${t.company || "this job"}${t.role ? ` (${t.role})` : ""}: ${t.changeCount} change${t.changeCount === 1 ? "" : "s"}.`),
+      h(
+        "div",
+        { class: "row", style: { marginTop: "8px" } },
+        h("button", { class: "btn", onclick: previewCurrent }, "Preview"),
+        h(
+          "button",
+          {
+            class: "btn",
+            onclick: () => {
+              S.editing = S.job.key;
+              switchTab("resume");
+            },
+          },
+          "Edit"
+        ),
+        h("button", { class: "btn", onclick: startTailor, disabled: !hasKey }, "Re-tailor"),
+        h(
+          "button",
+          {
+            class: "btn ghost danger",
+            onclick: () => {
+              delete S.tailored[S.job.key];
+              saveTailored();
+              renderApply();
+            },
+          },
+          "Remove"
+        )
+      )
+    );
+    return card;
+  }
+
+  card.append(
+    h("p", { class: "muted small" }, "Claude reads this posting and rewords and reorders your existing bullets and skills to match its keywords. You review every change first, and it never makes up experience."),
+    h("button", { class: "btn primary block", onclick: startTailor, disabled: !hasKey || !hasContent(S.base) }, "Tailor my resume to this job"),
+    !hasKey ? h("div", { class: "small muted", style: { marginTop: "6px" } }, "Connect Claude in Settings to enable tailoring.") : !hasContent(S.base) ? h("div", { class: "small muted", style: { marginTop: "6px" } }, "Upload your resume (Resume tab) first.") : null
+  );
+  return card;
+}
+
+async function startTailor() {
+  await withBusy("tailor", async () => {
+    const posting = await Page.readJobPosting(S.tab);
+    S.posting[S.job.key] = posting;
+    const out = await AI.tailorResume(S.settings, R.forAI(S.base), posting);
+    S.pending = {
+      company: out.company || S.job.company || "",
+      role: out.role || S.job.title || "",
+      keywords: out.keywords || [],
+      missing: out.missing_keywords || [],
+      changes: R.changesFromTailoring(S.base, out),
+    };
+  });
+}
+
+function acceptTailoring() {
+  const p = S.pending;
+  const accepted = p.changes.filter((c) => c.accepted);
+  S.tailored[S.job.key] = {
+    company: p.company,
+    role: p.role,
+    url: S.job.url,
+    resume: R.applyChanges(S.base, accepted),
+    changeCount: accepted.length,
+    keywords: p.keywords,
+    missing: p.missing,
+    createdAt: Date.now(),
+  };
+  // Keep the 40 most recent tailored versions.
+  const keys = Object.keys(S.tailored).sort((a, b) => S.tailored[b].createdAt - S.tailored[a].createdAt);
+  for (const k of keys.slice(40)) delete S.tailored[k];
+  S.pending = null;
+  store.set("tailored", S.tailored);
+  const { pages } = renderResume(S.tailored[S.job.key].resume);
+  toast(pages > 1 ? "Saved, but it runs over one page. Hide a bullet or two in Edit." : "Tailored resume saved for this job.");
+  renderApply();
+}
+
+function fillCard(hasResume) {
+  const card = h("div", { class: "card" }, h("h3", {}, h("span", { class: "step" }, "2"), "Fill the application"));
+  const file = hasResume ? { name: resumeNameForJob() } : null;
+  card.append(
+    h("p", { class: "muted small" }, "Fills in your name, contact details, school, links and standard questions, and attaches ", file ? h("strong", {}, file.name) : "your resume", ". Already-filled fields are left alone."),
+    h("button", { class: "btn primary block", onclick: doAutofill, disabled: S.busy.fill }, S.busy.fill ? [spinner(), " Filling…"] : "Autofill this page")
+  );
+  const r = S.report;
+  if (r) {
+    const summary = [];
+    summary.push(h("div", { class: `notice ${r.filled.length || r.attached ? "good" : "warn"}`, style: { marginTop: "8px" } }, r.filled.length || r.attached ? `Filled ${r.filled.length} field${r.filled.length === 1 ? "" : "s"}${r.attached ? `, attached ${r.attached}` : ""}.` : r.controls ? "Didn't recognize any fields here. If this is a job description, click Apply on the page first." : "No form fields found on this page. Click the site's Apply button, then try again."));
+    if (!r.attached && r.controls) summary.push(h("div", { class: "notice warn", style: { marginTop: "6px" } }, "Couldn't find the resume upload field. Use Download below and upload it yourself."));
+    if (r.review.length)
+      summary.push(
+        h("details", { style: { marginTop: "8px" }, open: true }, h("summary", { class: "small" }, `${r.review.length} need your attention (amber on the page)`), h("ul", { class: "report-list" }, r.review.map((x) => h("li", {}, h("strong", {}, x.label), ": ", x.reason))))
+      );
+    if (r.filled.length) summary.push(h("details", { style: { marginTop: "6px" } }, h("summary", { class: "small" }, "What was filled (green on the page)"), h("ul", { class: "report-list" }, r.filled.map((x) => h("li", {}, h("strong", {}, x.label), ": ", x.value)))));
+    card.append(...summary);
+  }
+  return card;
+}
+
+async function doAutofill() {
+  await withBusy("fill", async () => {
+    const file = await resumeFileForJob();
+    S.report = await Page.autofill(S.tab, { profile: S.profile, resumeFile: file });
+  });
+}
+
+function questionsCard(hasKey) {
+  const card = h("div", { class: "card" }, h("h3", {}, h("span", { class: "step" }, "3"), "Answer the real questions"));
+  card.append(
+    h("p", { class: "muted small" }, "Claude drafts answers to the remaining questions (\"Why this company?\", dropdowns, and so on) from your resume and this posting. Drafts show up purple on the page. Read and edit them before you submit."),
+    h("button", { class: "btn block", onclick: doDraftAnswers, disabled: !hasKey || S.busy.answers }, S.busy.answers ? [spinner(), " Drafting answers…"] : "Draft answers to open questions")
+  );
+  if (S.answers) {
+    const list = S.answers.filter((a) => a.answer);
+    card.append(h("div", { class: "small muted", style: { marginTop: "8px" } }, `${list.length} of ${S.answers.length} questions drafted. Copy any that didn't paste in:`));
+    for (const a of S.answers) {
+      card.append(
+        h(
+          "div",
+          { class: "change" },
+          h("div", { class: "where" }, a.question),
+          h("div", { class: "after" }, a.answer || h("span", { class: "muted" }, "(left for you: not enough info to answer truthfully)")),
+          a.answer &&
+            h(
+              "div",
+              { class: "row end" },
+              h(
+                "button",
+                {
+                  class: "btn ghost small",
+                  onclick: async () => {
+                    await navigator.clipboard.writeText(a.answer);
+                    toast("Copied");
+                  },
+                },
+                "Copy"
+              )
+            )
+        )
+      );
+    }
+  }
+  return card;
+}
+
+async function doDraftAnswers() {
+  await withBusy("answers", async () => {
+    const questions = await Page.collectQuestions(S.tab);
+    if (!questions.length) {
+      S.answers = [];
+      toast("No unanswered questions found on this page.");
+      return;
+    }
+    let posting = S.posting[S.job.key];
+    if (!posting) {
+      try {
+        posting = await Page.readJobPosting(S.tab);
+      } catch {
+        posting = { text: "" };
+      }
+    }
+    const t = currentTailored();
+    const answers = await AI.draftAnswers(S.settings, {
+      questions,
+      resumeText: resumeToText(t?.resume || S.base),
+      profile: S.profile,
+      job: { ...posting, company: jobLabel().company, role: jobLabel().role },
+    });
+    const byId = Object.fromEntries(answers.map((a) => [a.qid, a.answer]));
+    S.answers = questions.map((q) => ({ ...q, answer: byId[q.qid] || "" }));
+    const n = await Page.fillAnswers(S.tab, answers.filter((a) => a.answer));
+    toast(`Drafted ${n} answer${n === 1 ? "" : "s"}. Review them before submitting.`);
+  });
+}
+
+function finishCard(applied) {
+  return h(
+    "div",
+    { class: "card" },
+    h("h3", {}, h("span", { class: "step" }, "4"), "Submit"),
+    h("p", { class: "muted small" }, "Look over the page, click the site's Submit button, then mark it applied here."),
+    h(
+      "div",
+      { class: "row" },
+      h("button", { class: "btn", onclick: downloadCurrent }, "Download PDF"),
+      h("span", { class: "spacer" }),
+      h(
+        "button",
+        {
+          class: `btn ${applied ? "" : "primary"}`,
+          onclick: () => {
+            if (applied) delete S.applied[S.job.key];
+            else S.applied[S.job.key] = { company: jobLabel().company, title: jobLabel().role, url: S.job.url, date: Date.now() };
+            store.set("applied", S.applied);
+            renderApply();
+          },
+        },
+        applied ? "Applied ✓ (undo)" : "Mark as applied"
+      )
+    )
+  );
+}
+
+async function previewCurrent() {
+  const t = currentTailored();
+  const src = t?.resume || S.base;
+  if (!hasContent(src)) return toast("Upload your resume first.", true);
+  await previewResume(src);
+}
+
+async function downloadCurrent() {
+  try {
+    const f = await resumeFileForJob();
+    if (!f) return toast("Upload your resume first.", true);
+    await downloadBase64(f.base64, f.name);
+    toast(`Saved Downloads/Resumes/${f.name}`);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// -------------------------------------------------------------- JOBS tab
+
+const CATEGORIES = ["", "Software", "AI/ML/Data", "Quant", "Product", "Hardware"];
+
+function filteredJobs() {
+  const terms = S.jobsQuery.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const cat = S.jobsCategory.toLowerCase().split("/")[0];
+  return S.jobsCache.items.filter((j) => {
+    if (S.hideApplied && S.applied[Jobs.jobKeyForUrl(j.url)]) return false;
+    if (cat && !j.category.toLowerCase().includes(cat)) return false;
+    const hay = `${j.company} ${j.title} ${j.locations.join(" ")}`.toLowerCase();
+    return terms.every((t) => hay.includes(t));
+  });
+}
+
+function renderJobs() {
+  const el = $("#tab-jobs");
+  const cache = S.jobsCache;
+  if (!cache.items.length && !S.busy.jobs && !S.jobsTried) {
+    S.jobsTried = true;
+    refreshJobList();
+  }
+
+  const search = h("input", {
+    type: "search",
+    placeholder: "Search company, role, location…",
+    value: S.jobsQuery,
+    oninput: debounce((e) => {
+      S.jobsQuery = e.target.value;
+      S.jobsShown = 50;
+      renderJobList(el.querySelector(".joblist-wrap"), filteredJobs());
+    }, 200),
+  });
+
+  const appliedCount = Object.keys(S.applied).length;
+  el.replaceChildren(
+    h(
+      "div",
+      { class: "card" },
+      search,
+      h(
+        "div",
+        { class: "row", style: { marginTop: "8px" } },
+        h(
+          "select",
+          {
+            style: { width: "auto" },
+            onchange: (e) => {
+              S.jobsCategory = e.target.value;
+              S.jobsShown = 50;
+              renderJobs();
+            },
+          },
+          CATEGORIES.map((c) => h("option", { value: c, selected: S.jobsCategory === c }, c || "All categories"))
+        ),
+        h(
+          "label",
+          { class: "row small" },
+          h("input", {
+            type: "checkbox",
+            checked: S.hideApplied,
+            onchange: (e) => {
+              S.hideApplied = e.target.checked;
+              renderJobs();
+            },
+          }),
+          "Hide applied"
+        ),
+        h("span", { class: "spacer" }),
+        h("button", { class: "btn ghost", onclick: refreshJobList, disabled: S.busy.jobs, title: "Refresh list" }, S.busy.jobs ? spinner() : "↻")
+      ),
+      h("div", { class: "small muted", style: { marginTop: "6px" } }, cache.fetchedAt ? `${cache.items.length} open internships · updated ${timeAgo(cache.fetchedAt)} · ${appliedCount} applied` : S.busy.jobs ? "Loading jobs…" : "")
+    ),
+    h("div", { class: "joblist-wrap" })
+  );
+  renderJobList(el.querySelector(".joblist-wrap"), filteredJobs());
+}
+
+function renderJobList(wrap, filtered) {
+  const rows = filtered.slice(0, S.jobsShown).map((j) => {
+    const key = Jobs.jobKeyForUrl(j.url);
+    const applied = !!S.applied[key];
+    const tailored = !!S.tailored[key];
+    return h(
+      "div",
+      { class: `job${applied ? " applied" : ""}`, onclick: () => openJob(j), title: j.url },
+      h(
+        "div",
+        { class: "meta" },
+        h("div", { class: "company" }, j.company),
+        h("div", { class: "title" }, j.title),
+        h("div", { class: "loc" }, j.locations.join(" · "))
+      ),
+      h("div", { style: { textAlign: "right" } }, h("div", { class: "small muted" }, Jobs.ageLabel(j.posted)), applied ? h("span", { class: "pill good" }, "Applied") : tailored ? h("span", { class: "pill" }, "Tailored") : null)
+    );
+  });
+  const more =
+    filtered.length > S.jobsShown
+      ? h(
+          "button",
+          {
+            class: "btn block",
+            style: { marginTop: "8px" },
+            onclick: () => {
+              S.jobsShown += 50;
+              renderJobList(wrap, filtered);
+            },
+          },
+          `Show more (${filtered.length - S.jobsShown} left)`
+        )
+      : null;
+  wrap.replaceChildren(rows.length ? h("div", { class: "joblist" }, rows) : h("p", { class: "muted" }, S.jobsCache.items.length ? "No jobs match." : ""), more);
+}
+
+function timeAgo(ms) {
+  const m = Math.floor((Date.now() - ms) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const hrs = Math.floor(m / 60);
+  return hrs < 24 ? `${hrs}h ago` : `${Math.floor(hrs / 24)}d ago`;
+}
+
+async function refreshJobList() {
+  await withBusy(
+    "jobs",
+    async () => {
+      S.jobsCache = await Jobs.refreshJobs(S.settings.jobSourceUrl);
+    },
+    () => S.activeTab === "jobs" && renderJobs()
+  );
+}
+
+async function openJob(j) {
+  const tab = await chrome.tabs.create({ url: j.url, active: true });
+  await store.setTabJob(tab.id, jobFromListing(j));
+  S.activeTab = "apply";
+  switchTab("apply");
+  await refreshContext();
+}
+
+// ------------------------------------------------------------ RESUME tab
+
+function editingResume() {
+  if (S.editing !== "base" && S.tailored[S.editing]) return S.tailored[S.editing].resume;
+  S.editing = "base";
+  return S.base;
+}
+
+function saveEditing() {
+  if (S.editing === "base") saveBase();
+  else saveTailored();
+  updateFit();
+}
+
+const updateFit = debounce(() => {
+  const el = document.getElementById("fit-info");
+  if (!el) return;
+  const r = editingResume();
+  if (!hasContent(r)) return (el.textContent = "");
+  try {
+    const { pages, size } = renderResume(r);
+    el.className = `pill ${pages > 1 ? "warn" : "good"}`;
+    el.textContent = pages > 1 ? `${pages} pages: hide or trim some bullets` : `Fits on 1 page (${size}pt)`;
+  } catch (e) {
+    el.textContent = "";
+  }
+}, 600);
+
+async function handleUpload(file) {
+  if (!file) return;
+  if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) return toast("Please upload a PDF.", true);
+  if (file.size > 20 * 1024 * 1024) return toast("That PDF is over 20 MB.", true);
+  const base64 = await fileToBase64(file);
+  S.resumePdf = { name: file.name, base64 };
+  await store.set("resumePdf", S.resumePdf);
+  if (!aiReady()) {
+    toast("Saved your PDF. Connect Claude in Settings to turn it into editable boxes.");
+    renderResumeTab();
+    return;
+  }
+  await parseUploaded();
+}
+
+async function parseUploaded() {
+  await withBusy(
+    "parse",
+    async () => {
+      const parsed = await AI.parseResume(S.settings, S.resumePdf.base64);
+      S.base = R.fromParsed(parsed);
+      S.editing = "base";
+      await store.set("resume", S.base);
+      if (parsed.profile) {
+        S.profile = R.mergeProfile(S.profile, parsed.profile);
+        await store.set("profile", S.profile);
+      }
+      toast("Resume parsed. Check the boxes below.");
+    },
+    renderResumeTab
+  );
+}
+
+function renderResumeTab() {
+  const el = $("#tab-resume");
+  const parts = [];
+
+  // Upload / status.
+  const fileInput = h("input", { type: "file", accept: "application/pdf,.pdf", style: { display: "none" }, onchange: (e) => handleUpload(e.target.files[0]) });
+  const drop = h(
+    "div",
+    {
+      class: "dropzone",
+      onclick: () => fileInput.click(),
+      ondragover: (e) => {
+        e.preventDefault();
+        drop.classList.add("drag");
+      },
+      ondragleave: () => drop.classList.remove("drag"),
+      ondrop: (e) => {
+        e.preventDefault();
+        drop.classList.remove("drag");
+        handleUpload(e.dataTransfer.files[0]);
+      },
+    },
+    S.busy.parse
+      ? [spinner(), " Reading your resume with Claude… (15–40s)"]
+      : [h("strong", {}, S.resumePdf ? "Upload a new resume PDF" : "Upload your resume (PDF)"), h("div", { class: "small muted" }, "Click or drop a file here. Claude turns it into editable boxes.")],
+    fileInput
+  );
+  const uploadCard = h("div", { class: "card" }, drop);
+  if (S.resumePdf) {
+    uploadCard.append(
+      h(
+        "div",
+        { class: "row small", style: { marginTop: "8px" } },
+        h("span", { class: "muted" }, `Uploaded: ${S.resumePdf.name}`),
+        h("span", { class: "spacer" }),
+        aiReady() && !S.busy.parse && h("button", { class: "btn ghost", onclick: parseUploaded }, hasContent(S.base) ? "Re-parse" : "Parse with Claude")
+      )
+    );
+  }
+  if (!hasContent(S.base) && !S.busy.parse) {
+    uploadCard.append(
+      h(
+        "div",
+        { class: "row small", style: { marginTop: "6px" } },
+        h(
+          "button",
+          {
+            class: "btn ghost",
+            onclick: () => {
+              S.base = R.emptyResume();
+              S.base.sections = [R.newSection("entries", "Education"), R.newSection("entries", "Experience"), R.newSection("entries", "Projects"), R.newSection("lines", "Technical Skills")];
+              saveBase();
+              renderResumeTab();
+            },
+          },
+          "Or start from a blank template"
+        )
+      )
+    );
+  }
+  parts.push(uploadCard);
+
+  if (!hasContent(S.base)) {
+    el.replaceChildren(...parts);
+    return;
+  }
+
+  const r = editingResume();
+
+  // Version picker + actions.
+  const versions = Object.entries(S.tailored).sort((a, b) => b[1].createdAt - a[1].createdAt);
+  parts.push(
+    h(
+      "div",
+      { class: "card" },
+      versions.length
+        ? h(
+            "label",
+            { class: "field" },
+            h("span", {}, "Editing"),
+            h(
+              "select",
+              {
+                onchange: (e) => {
+                  S.editing = e.target.value;
+                  renderResumeTab();
+                },
+              },
+              h("option", { value: "base", selected: S.editing === "base" }, "Base resume (used for tailoring)"),
+              versions.map(([k, v]) => h("option", { value: k, selected: S.editing === k }, `Tailored: ${v.company || k}${v.role ? ` (${v.role})` : ""}`))
+            )
+          )
+        : null,
+      h(
+        "div",
+        { class: "row" },
+        h("button", { class: "btn", onclick: () => previewResume(r).catch((e) => toast(e.message, true)) }, "Preview PDF"),
+        h(
+          "button",
+          {
+            class: "btn",
+            onclick: async () => {
+              const t = S.editing !== "base" ? S.tailored[S.editing] : null;
+              const name = R.fileNameFor(S.settings.fileNamePattern, r, S.profile, t?.company, t?.role);
+              const pdf = await buildResumePdf(r, S.settings);
+              await downloadBase64(pdf.base64, name);
+              toast(`Saved Downloads/Resumes/${name}${pdf.engine === "built-in" ? "" : ` (compiled with ${pdf.engine})`}`);
+            },
+          },
+          "Download"
+        ),
+        h("span", { class: "spacer" }),
+        h("span", { id: "fit-info", class: "pill" }, "")
+      ),
+      h(
+        "div",
+        { class: "row small", style: { marginTop: "8px" } },
+        h("span", { class: "muted" }, "Jake's Resume (LaTeX):"),
+        h(
+          "button",
+          {
+            class: "btn ghost",
+            onclick: () => {
+              const t = S.editing !== "base" ? S.tailored[S.editing] : null;
+              downloadTex(r, R.fileNameFor(S.settings.fileNamePattern, r, S.profile, t?.company, t?.role));
+              toast("Saved the .tex to Downloads/Resumes/");
+            },
+          },
+          "Download .tex"
+        ),
+        h("button", { class: "btn ghost", onclick: () => openInOverleaf(r) }, "Open in Overleaf")
+      ),
+      h("div", { class: "small muted", style: { marginTop: "4px" } }, latexStatus() ? "PDFs use the built-in Computer Modern renderer (no LaTeX found on your computer)." : S.settings.provider === "claude-code" && S.settings.renderer !== "built-in" ? "PDFs are compiled with LaTeX on your computer when available." : "PDFs use the built-in Computer Modern renderer.")
+    )
+  );
+  parts.push(basicsCard(r));
+  parts.push(
+    h(
+      "div",
+      { class: "card" },
+      h("h3", {}, "Summary ", h("span", { class: "muted small" }, "(optional)")),
+      textarea({
+        value: r.summary,
+        placeholder: "Leave blank if your resume has no summary",
+        oninput: (e) => {
+          r.summary = e.target.value;
+          saveEditing();
+        },
+      })
+    )
+  );
+  r.sections.forEach((s, i) => parts.push(sectionCard(r, s, i)));
+  parts.push(
+    h(
+      "div",
+      { class: "row", style: { marginBottom: "10px" } },
+      h("span", { class: "small muted" }, "Add section:"),
+      h("button", { class: "btn", onclick: () => addSection(r, "entries", "New Section") }, "+ Entries"),
+      h("button", { class: "btn", onclick: () => addSection(r, "lines", "Skills") }, "+ Skills list"),
+      h("button", { class: "btn", onclick: () => addSection(r, "text", "Section") }, "+ Text")
+    )
+  );
+  parts.push(
+    h(
+      "details",
+      { class: "card" },
+      h("summary", {}, "Backup / restore"),
+      h(
+        "div",
+        { class: "row", style: { marginTop: "8px" } },
+        h(
+          "button",
+          {
+            class: "btn",
+            onclick: async () => {
+              const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(r, null, 2))));
+              await chrome.downloads.download({ url: `data:application/json;base64,${b64}`, filename: "Resumes/resume.json", conflictAction: "overwrite" });
+            },
+          },
+          "Export JSON"
+        ),
+        h(
+          "button",
+          {
+            class: "btn",
+            onclick: () => {
+              const inp = h("input", {
+                type: "file",
+                accept: ".json,application/json",
+                onchange: async (e) => {
+                  try {
+                    const data = JSON.parse(await e.target.files[0].text());
+                    if (!data.basics || !Array.isArray(data.sections)) throw new Error("Not a JobPilot resume file.");
+                    S.base = data;
+                    S.editing = "base";
+                    await store.set("resume", S.base);
+                    renderResumeTab();
+                    toast("Imported.");
+                  } catch (err) {
+                    toast(err.message, true);
+                  }
+                },
+              });
+              inp.click();
+            },
+          },
+          "Import JSON"
+        )
+      )
+    )
+  );
+  el.replaceChildren(...parts);
+  updateFit();
+}
+
+function addSection(r, kind, title) {
+  const s = R.newSection(kind, title);
+  if (kind === "entries") s.entries.push(R.newEntry());
+  if (kind === "lines") s.lines.push(R.newLine());
+  r.sections.push(s);
+  saveEditing();
+  renderResumeTab();
+}
+
+function input(obj, key, placeholder, extra = {}) {
+  return h("input", {
+    type: "text",
+    value: obj[key] || "",
+    placeholder,
+    oninput: (e) => {
+      obj[key] = e.target.value;
+      saveEditing();
+    },
+    ...extra,
+  });
+}
+
+function move(arr, i, d) {
+  const j = i + d;
+  if (j < 0 || j >= arr.length) return;
+  [arr[i], arr[j]] = [arr[j], arr[i]];
+}
+
+function structural(fn) {
+  return () => {
+    fn();
+    saveEditing();
+    renderResumeTab();
+  };
+}
+
+function basicsCard(r) {
+  const b = r.basics;
+  return h(
+    "div",
+    { class: "card" },
+    h("h3", {}, "Header"),
+    h("label", { class: "field" }, h("span", {}, "Name"), input(b, "name", "Full name")),
+    h("div", { class: "grid2" }, h("label", { class: "field" }, h("span", {}, "Email"), input(b, "email", "you@school.edu")), h("label", { class: "field" }, h("span", {}, "Phone"), input(b, "phone", "(555) 555-5555"))),
+    h("label", { class: "field" }, h("span", {}, "Location"), input(b, "location", "City, ST (optional)")),
+    h("span", { class: "small muted" }, "Links"),
+    b.links.map((l, i) =>
+      h(
+        "div",
+        { class: "lineitem" },
+        input(l, "label", "Label", { class: "label" }),
+        input(l, "url", "https://…"),
+        h("button", { class: "icon", title: "Remove", onclick: structural(() => b.links.splice(i, 1)) }, "✕")
+      )
+    ),
+    h("button", { class: "btn ghost small", onclick: structural(() => b.links.push({ label: "", url: "" })) }, "+ Add link")
+  );
+}
+
+function sectionCard(r, s, si) {
+  const card = h(
+    "div",
+    { class: "card section-card" },
+    h(
+      "div",
+      { class: "head" },
+      input(s, "title", "Section title"),
+      h("button", { class: "icon", title: "Move up", onclick: structural(() => move(r.sections, si, -1)) }, "↑"),
+      h("button", { class: "icon", title: "Move down", onclick: structural(() => move(r.sections, si, 1)) }, "↓"),
+      h(
+        "button",
+        {
+          class: "icon",
+          title: "Delete section",
+          onclick: () => {
+            if (confirm(`Delete the "${s.title}" section?`)) structural(() => r.sections.splice(si, 1))();
+          },
+        },
+        "🗑"
+      )
+    )
+  );
+
+  if (s.kind === "entries") {
+    s.entries.forEach((e, ei) => {
+      const entry = h(
+        "div",
+        { class: `entry${e.hidden ? " hidden-item" : ""}` },
+        h(
+          "div",
+          { class: "head" },
+          input(e, "title", "Organization / school / project"),
+          h("button", { class: "icon", title: e.hidden ? "Show on resume" : "Hide from resume", onclick: structural(() => (e.hidden = !e.hidden)) }, e.hidden ? "◌" : "●"),
+          h("button", { class: "icon", title: "Move up", onclick: structural(() => move(s.entries, ei, -1)) }, "↑"),
+          h("button", { class: "icon", title: "Move down", onclick: structural(() => move(s.entries, ei, 1)) }, "↓"),
+          h("button", { class: "icon", title: "Delete", onclick: structural(() => s.entries.splice(ei, 1)) }, "✕")
+        ),
+        h("div", { class: "grid2" }, input(e, "subtitle", "Role / degree"), input(e, "dates", "Dates (e.g. May 2025 – Aug 2025)")),
+        h("div", { style: { margin: "6px 0" } }, input(e, "location", "Location (optional)")),
+        e.bullets.map((b, bi) =>
+          h(
+            "div",
+            { class: `bullet${b.hidden ? " hidden-item" : ""}` },
+            h("span", { class: "dot" }, "•"),
+            textarea({
+              value: b.text,
+              oninput: (ev) => {
+                b.text = ev.target.value;
+                saveEditing();
+              },
+            }),
+            h(
+              "div",
+              { class: "tools" },
+              h("button", { class: "icon", title: b.hidden ? "Show" : "Hide", onclick: structural(() => (b.hidden = !b.hidden)) }, b.hidden ? "◌" : "●"),
+              h("button", { class: "icon", title: "Move up", onclick: structural(() => move(e.bullets, bi, -1)) }, "↑"),
+              h("button", { class: "icon", title: "Delete", onclick: structural(() => e.bullets.splice(bi, 1)) }, "✕")
+            )
+          )
+        ),
+        h("button", { class: "btn ghost small", onclick: structural(() => e.bullets.push(R.newBullet())) }, "+ Bullet")
+      );
+      card.append(entry);
+    });
+    card.append(h("button", { class: "btn small", onclick: structural(() => s.entries.push(R.newEntry())) }, "+ Add entry"));
+  } else if (s.kind === "lines") {
+    s.lines.forEach((l, li) =>
+      card.append(
+        h(
+          "div",
+          { class: `lineitem${l.hidden ? " hidden-item" : ""}` },
+          input(l, "label", "Label", { class: "label" }),
+          textarea({
+            value: l.text,
+            placeholder: "Python, Java, React…",
+            oninput: (ev) => {
+              l.text = ev.target.value;
+              saveEditing();
+            },
+          }),
+          h(
+            "div",
+            { class: "tools" },
+            h("button", { class: "icon", title: l.hidden ? "Show" : "Hide", onclick: structural(() => (l.hidden = !l.hidden)) }, l.hidden ? "◌" : "●"),
+            h("button", { class: "icon", title: "Delete", onclick: structural(() => s.lines.splice(li, 1)) }, "✕")
+          )
+        )
+      )
+    );
+    card.append(h("button", { class: "btn ghost small", onclick: structural(() => s.lines.push(R.newLine())) }, "+ Add row"));
+  } else {
+    card.append(
+      textarea({
+        value: s.text,
+        oninput: (ev) => {
+          s.text = ev.target.value;
+          saveEditing();
+        },
+      })
+    );
+  }
+  return card;
+}
+
+// ---------------------------------------------------------- SETTINGS tab
+
+const YES_NO = [
+  ["yes", "Yes"],
+  ["no", "No"],
+];
+const EEO = {
+  gender: ["Decline to self-identify", "Male", "Female", "Non-binary"],
+  race: ["Decline to self-identify", "Asian", "Black or African American", "Hispanic or Latino", "White", "Two or More Races", "Native Hawaiian or Other Pacific Islander", "American Indian or Alaska Native"],
+  hispanic: ["Decline to self-identify", "Yes", "No"],
+  veteran: ["Decline to self-identify", "I am not a protected veteran", "I identify as one or more of the classifications of protected veteran"],
+  disability: ["Decline to self-identify", "No, I do not have a disability", "Yes, I have a disability"],
+};
+
+function renderSettings() {
+  const el = $("#tab-settings");
+  const st = S.settings;
+  const p = S.profile;
+
+  const status = h("span", { class: "small" });
+  const usingCC = st.provider === "claude-code";
+
+  const testButton = h(
+    "button",
+    {
+      class: "btn primary",
+      onclick: async (e) => {
+        e.target.disabled = true;
+        status.replaceChildren(spinner(), usingCC ? " Asking Claude Code… (can take ~10s)" : " Testing…");
+        try {
+          await store.set("settings", st);
+          const r = await AI.testConnection(st);
+          st.aiVerified = true;
+          await store.set("settings", st);
+          resetLatexStatus();
+          status.replaceChildren(h("span", { class: "pill good" }, usingCC ? `Connected ✓ ${r.split(" · ").slice(1).join(" · ")}` : "Connected ✓"));
+        } catch (err) {
+          status.replaceChildren(h("span", { class: "pill bad", style: { whiteSpace: "normal" } }, err.message));
+        } finally {
+          e.target.disabled = false;
+        }
+      },
+    },
+    "Save & test"
+  );
+
+  const providerPick = h(
+    "div",
+    { class: "stack", style: { marginBottom: "10px" } },
+    [
+      ["claude-code", "My Claude subscription (via Claude Code)", "Uses your Pro/Max plan's limits. No API key needed. Needs Claude Code and Node.js on this computer."],
+      ["api", "Anthropic API key", "Pay-as-you-go, about 5–15¢ per tailored resume on Opus 5.5. Works on any computer."],
+    ].map(([v, title, sub]) =>
+      h(
+        "label",
+        { class: "change", style: { display: "flex", gap: "8px", cursor: "pointer", borderColor: st.provider === v ? "var(--accent)" : "" } },
+        h("input", {
+          type: "radio",
+          name: "provider",
+          checked: st.provider === v,
+          onchange: () => {
+            st.provider = v;
+            st.aiVerified = false;
+            saveSettings();
+            renderSettings();
+          },
+        }),
+        h("div", {}, h("div", { style: { fontWeight: 600 } }, title), h("div", { class: "small muted" }, sub))
+      )
+    )
+  );
+
+  let body;
+  if (usingCC) {
+    const cmd = "node bridge/install.js";
+    body = [
+      h("div", { class: "small", style: { fontWeight: 600 } }, "One-time setup"),
+      h(
+        "ol",
+        { class: "small", style: { paddingLeft: "18px", margin: "6px 0 10px" } },
+        h("li", {}, "Make sure Claude Code is logged in: open a terminal, run ", h("code", {}, "claude"), ", and sign in with your Claude account if asked."),
+        h(
+          "li",
+          {},
+          "In a terminal, ",
+          h("code", {}, "cd"),
+          " into the JobPilot folder (the one containing ",
+          h("code", {}, "extension"),
+          " and ",
+          h("code", {}, "bridge"),
+          ") and run:",
+          h(
+            "div",
+            { class: "row", style: { marginTop: "4px", flexWrap: "nowrap" } },
+            h("code", { style: { flex: 1, padding: "6px 8px", background: "var(--bg)", borderRadius: "6px", border: "1px solid var(--border)" } }, cmd),
+            h(
+              "button",
+              {
+                class: "btn ghost",
+                onclick: async () => {
+                  await navigator.clipboard.writeText(cmd);
+                  toast("Copied");
+                },
+              },
+              "Copy"
+            )
+          ),
+          h("div", { class: "muted", style: { marginTop: "4px" } }, "Needs Node.js (nodejs.org). Or just ask Claude Code to run that command for you.")
+        ),
+        h("li", {}, "Restart the browser, then click Save & test.")
+      ),
+      h(
+        "label",
+        { class: "field" },
+        h("span", {}, "Model"),
+        h("select", { onchange: (e) => ((st.ccModel = e.target.value), saveSettings()) }, AI.CC_MODELS.map((m) => h("option", { value: m.id, selected: (st.ccModel || "default") === m.id }, m.label)))
+      ),
+    ];
+  } else {
+    const keyInput = h("input", { type: "password", value: st.apiKey, placeholder: "sk-ant-…", autocomplete: "off", oninput: (e) => ((st.apiKey = e.target.value.trim()), saveSettings()) });
+    body = [
+      h(
+        "ol",
+        { class: "small", style: { paddingLeft: "18px", margin: "0 0 10px" } },
+        h("li", {}, "Go to ", h("a", { href: "https://console.anthropic.com/settings/keys", target: "_blank" }, "console.anthropic.com → API Keys"), " and create a key."),
+        h("li", {}, "Add a few dollars of credit under Billing."),
+        h("li", {}, "Paste the key below and click Save & test.")
+      ),
+      h(
+        "label",
+        { class: "field" },
+        h("span", {}, "API key (stored only in this browser)"),
+        h(
+          "div",
+          { class: "row", style: { flexWrap: "nowrap" } },
+          keyInput,
+          h("button", { class: "btn ghost", onclick: () => (keyInput.type = keyInput.type === "password" ? "text" : "password") }, "Show")
+        )
+      ),
+      h(
+        "label",
+        { class: "field" },
+        h("span", {}, "Model"),
+        h("select", { onchange: (e) => ((st.model = e.target.value), saveSettings()) }, AI.MODELS.map((m) => h("option", { value: m.id, selected: st.model === m.id }, m.label)))
+      ),
+    ];
+  }
+
+  const aiCard = h("div", { class: "card" }, h("h3", {}, "Connect Claude"), providerPick, body, h("div", { class: "row" }, testButton, status));
+
+  const pf = (key, label, placeholder = "") =>
+    h("label", { class: "field" }, h("span", {}, label), h("input", { type: "text", value: p[key] || "", placeholder, oninput: (e) => ((p[key] = e.target.value), saveProfile()) }));
+  const sel = (key, label, options) =>
+    h("label", { class: "field" }, h("span", {}, label), h("select", { onchange: (e) => ((p[key] = e.target.value), saveProfile()) }, options.map(([v, t]) => h("option", { value: v, selected: p[key] === v }, t))));
+  const eeo = (key, label) => {
+    const listId = `dl-${key}`;
+    return h(
+      "label",
+      { class: "field" },
+      h("span", {}, label),
+      h("input", { type: "text", list: listId, value: p[key] || "", oninput: (e) => ((p[key] = e.target.value), saveProfile()) }),
+      h("datalist", { id: listId }, EEO[key].map((o) => h("option", { value: o })))
+    );
+  };
+
+  const profileCard = h(
+    "div",
+    { class: "card" },
+    h("h3", {}, "Application profile"),
+    h("p", { class: "small muted" }, "Used to autofill forms. Filled in automatically when your resume is parsed, so check it over."),
+    h("div", { class: "grid2" }, pf("firstName", "First name"), pf("lastName", "Last name")),
+    h("div", { class: "grid2" }, pf("preferredName", "Preferred name"), pf("pronouns", "Pronouns", "optional")),
+    h("div", { class: "grid2" }, pf("email", "Email"), pf("phone", "Phone")),
+    pf("linkedin", "LinkedIn URL", "https://linkedin.com/in/…"),
+    h("div", { class: "grid2" }, pf("github", "GitHub URL"), pf("website", "Portfolio / website")),
+    pf("address", "Street address", "optional"),
+    h("div", { class: "grid2" }, pf("city", "City"), pf("state", "State")),
+    h("div", { class: "grid2" }, pf("zip", "ZIP"), pf("country", "Country")),
+    hr(),
+    pf("school", "School"),
+    h("div", { class: "grid2" }, pf("degree", "Degree", "Bachelor of Science"), pf("major", "Major")),
+    h("div", { class: "grid2" }, pf("gradMonth", "Graduation month", "May"), pf("gradYear", "Graduation year", "2028")),
+    h("div", { class: "grid2" }, pf("gpa", "GPA", "optional"), pf("availableStart", "Available to start", "May 2027")),
+    h("div", { class: "grid2" }, pf("currentCompany", "Current company", "defaults to school"), pf("currentTitle", "Current title"))
+  );
+
+  const answersCard = h(
+    "div",
+    { class: "card" },
+    h("h3", {}, "Standard answers"),
+    h("div", { class: "grid2" }, sel("workAuthorized", "Authorized to work in the US?", YES_NO), sel("needsSponsorship", "Need visa sponsorship?", YES_NO)),
+    h("div", { class: "grid2" }, sel("over18", "18 or older?", YES_NO), sel("willingToRelocate", "Willing to relocate?", YES_NO)),
+    pf("howHeard", "How did you hear about us?", "Job board"),
+    h("details", {}, h("summary", { class: "small" }, "Voluntary self-identification (EEO)"), h("div", { style: { marginTop: "8px" } }, eeo("gender", "Gender"), eeo("race", "Race / ethnicity"), eeo("hispanic", "Hispanic or Latino?"), eeo("veteran", "Veteran status"), eeo("disability", "Disability status")))
+  );
+
+  const preview = h("div", { class: "small muted" });
+  const updatePreview = () => (preview.textContent = `e.g. ${R.fileNameFor(st.fileNamePattern, S.base, p, "Stripe", "Software Engineer Intern")}`);
+  updatePreview();
+  const filesCard = h(
+    "div",
+    { class: "card" },
+    h("h3", {}, "Files & formatting"),
+    h(
+      "label",
+      { class: "field" },
+      h("span", {}, "PDF file name ({First} {Last} {Company} {Role})"),
+      h("input", {
+        type: "text",
+        value: st.fileNamePattern,
+        oninput: (e) => {
+          st.fileNamePattern = e.target.value;
+          saveSettings();
+          updatePreview();
+        },
+      }),
+      preview
+    ),
+    h(
+      "label",
+      { class: "field" },
+      h("span", {}, "Resume PDF (Jake's Resume template)"),
+      h(
+        "select",
+        {
+          onchange: (e) => {
+            st.renderer = e.target.value;
+            resetLatexStatus();
+            saveSettings();
+          },
+        },
+        [
+          ["latex", "Compile with LaTeX on my computer when available (exact)"],
+          ["built-in", "Always use the built-in renderer (faster)"],
+        ].map(([v, t]) => h("option", { value: v, selected: (st.renderer || "latex") === v }, t))
+      ),
+      h("div", { class: "small muted" }, "LaTeX compiling needs the Claude Code bridge plus a TeX install (MacTeX, MiKTeX, TeX Live or Tectonic). Without it, JobPilot draws the same layout itself in Computer Modern.")
+    ),
+    h(
+      "label",
+      { class: "field" },
+      h("span", {}, "When a job isn't tailored, attach"),
+      h(
+        "select",
+        { onchange: (e) => ((st.attachWhenUntailored = e.target.value), saveSettings()) },
+        [
+          ["generated", "PDF generated from my edited boxes"],
+          ["original", "My original uploaded PDF"],
+        ].map(([v, t]) => h("option", { value: v, selected: st.attachWhenUntailored === v }, t))
+      )
+    ),
+    h("div", { class: "small muted" }, "Downloads go to Downloads/Resumes/ and replace older files with the same name, so you won't end up with \"Resume (100).pdf\".")
+  );
+
+  const sourceCard = h(
+    "div",
+    { class: "card" },
+    h("h3", {}, "Job list source"),
+    h("p", { class: "small muted" }, "Any SimplifyJobs-format listings.json. Swap Summer2027-Internships for New-Grad-Positions to see new grad roles."),
+    h("input", { type: "url", value: st.jobSourceUrl, oninput: (e) => ((st.jobSourceUrl = e.target.value.trim()), saveSettings()) })
+  );
+
+  const updateStatus = h("span", { class: "small" });
+  const updatesCard = h(
+    "div",
+    { class: "card" },
+    h("h3", {}, "Updates"),
+    h(
+      "p",
+      { class: "small muted" },
+      "JobPilot updates from a GitHub repo. One-click updates need a ",
+      h("code", {}, "git clone"),
+      " of the repo plus the Claude Code bridge installed from inside it; otherwise you'll get a notice with instructions."
+    ),
+    h(
+      "div",
+      { class: "grid2" },
+      h("label", { class: "field" }, h("span", {}, "Repo (owner/name)"), h("input", { type: "text", value: st.updateRepo, oninput: (e) => ((st.updateRepo = e.target.value.trim()), saveSettings()) })),
+      h("label", { class: "field" }, h("span", {}, "Branch"), h("input", { type: "text", value: st.updateBranch, oninput: (e) => ((st.updateBranch = e.target.value.trim()), saveSettings()) }))
+    ),
+    h(
+      "label",
+      { class: "field" },
+      h("span", {}, "When there's an update"),
+      h(
+        "select",
+        { onchange: (e) => ((st.autoUpdate = e.target.value), saveSettings()) },
+        [
+          ["auto", "Install it automatically when the browser starts"],
+          ["ask", "Show a notice and let me click Update"],
+          ["off", "Don't check"],
+        ].map(([v, t]) => h("option", { value: v, selected: st.autoUpdate === v }, t))
+      )
+    ),
+    h(
+      "div",
+      { class: "row" },
+      h(
+        "button",
+        {
+          class: "btn",
+          onclick: async (e) => {
+            e.target.disabled = true;
+            updateStatus.replaceChildren(spinner(), " Checking…");
+            try {
+              await store.set("settings", st);
+              const r = await Update.checkForUpdate(st);
+              updateStatus.replaceChildren(h("span", { class: `pill ${r.available ? "warn" : "good"}` }, r.detail));
+              renderUpdateBanner(r);
+            } catch (err) {
+              updateStatus.replaceChildren(h("span", { class: "pill bad", style: { whiteSpace: "normal" } }, err.message));
+            } finally {
+              e.target.disabled = false;
+            }
+          },
+        },
+        "Check now"
+      ),
+      h("span", { class: "small muted" }, `v${chrome.runtime.getManifest().version}`),
+      updateStatus
+    )
+  );
+
+  const dataCard = h(
+    "div",
+    { class: "card" },
+    h("h3", {}, "Your data"),
+    h("p", { class: "small muted" }, "Everything (resume, profile, API key, applied list) is stored locally in this Chrome profile. It's sent only to Anthropic when you use an AI feature."),
+    h(
+      "button",
+      {
+        class: "btn danger",
+        onclick: async () => {
+          if (!confirm("Delete your resume, profile, API key, tailored versions and applied list from this browser?")) return;
+          await chrome.storage.local.clear();
+          location.reload();
+        },
+      },
+      "Erase all data"
+    )
+  );
+
+  el.replaceChildren(aiCard, profileCard, answersCard, filesCard, sourceCard, updatesCard, dataCard);
+}
+
+function hr() {
+  return h("hr");
+}
+
+// --------------------------------------------------------------- updates
+
+function renderUpdateBanner(status) {
+  document.querySelector("#update-banner")?.remove();
+  if (!status?.available || S.settings.autoUpdate === "off") return;
+  const banner = h(
+    "div",
+    { id: "update-banner", class: "card", style: { margin: "8px 12px 0", borderColor: "var(--accent)" } },
+    h("div", { class: "small", style: { fontWeight: 600 } }, `JobPilot update available · ${status.detail}`),
+    status.canAutoUpdate
+      ? h(
+          "div",
+          { class: "row", style: { marginTop: "6px" } },
+          h(
+            "button",
+            {
+              class: "btn primary",
+              onclick: async (e) => {
+                e.target.disabled = true;
+                e.target.textContent = "Updating…";
+                try {
+                  await Update.applyUpdate(S.settings); // reloads the extension
+                } catch (err) {
+                  toast(err.message, true);
+                  e.target.disabled = false;
+                  e.target.textContent = "Update now";
+                }
+              },
+            },
+            "Update now"
+          ),
+          h("span", { class: "small muted" }, "The panel will close; reopen it after.")
+        )
+      : h(
+          "div",
+          { class: "small muted", style: { marginTop: "4px" } },
+          "Run ",
+          h("code", {}, "git pull"),
+          " in your JobPilot folder (or download the ZIP again from ",
+          h("a", { href: Update.repoUrl(S.settings), target: "_blank" }, S.settings.updateRepo),
+          "), then click reload on JobPilot in chrome://extensions."
+        )
+  );
+  document.querySelector("main").before(banner);
+}
+
+// ------------------------------------------------------------------ init
+
+async function init() {
+  const [settings, profile, base, resumePdf, tailored, applied, jobsCache] = await Promise.all([
+    store.getSettings(),
+    store.getProfile(),
+    store.get("resume", null),
+    store.get("resumePdf", null),
+    store.get("tailored", {}),
+    store.get("applied", {}),
+    Jobs.getJobs(),
+  ]);
+  Object.assign(S, { settings, profile, base, resumePdf, tailored, applied, jobsCache });
+  await loadFonts();
+
+  document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+
+  chrome.tabs.onActivated.addListener(refreshContext);
+  chrome.tabs.onUpdated.addListener((tabId, info) => {
+    if (S.tab && tabId === S.tab.id && (info.url || info.status === "complete")) refreshContext();
+  });
+  chrome.windows?.onFocusChanged?.addListener(refreshContext);
+
+  if (!settings.aiVerified && !settings.apiKey && !base && !resumePdf) S.activeTab = "settings";
+  switchTab(S.activeTab);
+  await refreshContext();
+
+  if (settings.autoUpdate !== "off") {
+    const last = await Update.lastStatus();
+    renderUpdateBanner(last);
+    if (Update.isStale(last)) Update.checkForUpdate(settings).then(renderUpdateBanner).catch(() => {});
+  }
+
+  // Refresh the job list in the background if it's stale (>6h).
+  if (Date.now() - jobsCache.fetchedAt > 6 * 3600 * 1000) {
+    Jobs.refreshJobs(settings.jobSourceUrl)
+      .then((c) => {
+        S.jobsCache = c;
+        if (S.activeTab === "jobs") renderJobs();
+      })
+      .catch(() => {});
+  }
+}
+
+init();

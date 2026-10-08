@@ -1,0 +1,68 @@
+// Talking to the active tab: reading the job posting and running the
+// autofill engine (content/autofill.js) in every frame.
+
+export async function activeTab() {
+  const isOwn = (t) => (t.url || "").startsWith(chrome.runtime.getURL(""));
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (tab && !isOwn(tab)) return tab;
+  // The panel itself was opened as a tab/window (e.g. in tests): use the
+  // active tab of another window.
+  const others = (await chrome.tabs.query({ active: true })).filter((t) => !isOwn(t));
+  return others[0] || tab;
+}
+
+function assertScriptable(tab) {
+  if (!tab || !/^https?:/.test(tab.url || "")) throw new Error("Open a job posting or application page in this tab first.");
+}
+
+async function inject(tabId) {
+  await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content/autofill.js"] });
+}
+
+async function runInFrames(tabId, func, args = []) {
+  const results = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func, args });
+  return results.map((r) => r.result).filter((r) => r !== undefined && r !== null);
+}
+
+// The posting text: the longest readable text among the tab's frames.
+export async function readJobPosting(tab) {
+  assertScriptable(tab);
+  const texts = await runInFrames(tab.id, () => {
+    const root = document.querySelector('main, [role="main"], #content, .job, [class*="job-description" i], article') || document.body;
+    const text = (root.innerText || "").length > 400 ? root.innerText : document.body.innerText;
+    return { url: location.href, title: document.title, text: (text || "").replace(/\n{3,}/g, "\n\n").slice(0, 40000) };
+  });
+  if (!texts.length) throw new Error("Couldn't read this page.");
+  texts.sort((a, b) => b.text.length - a.text.length);
+  const best = texts[0];
+  if (best.text.length < 200) throw new Error("This page doesn't have much text. Open the job description page, then try again.");
+  return { url: tab.url, title: tab.title, text: best.text };
+}
+
+export async function autofill(tab, payload) {
+  assertScriptable(tab);
+  await inject(tab.id);
+  const reports = await runInFrames(tab.id, (p) => window.__jobpilot.fill(p), [payload]);
+  // Only attach the resume once, in the first frame that has a resume field.
+  const merged = { filled: [], review: [], attached: null, skippedFilled: 0, controls: 0 };
+  for (const r of reports) {
+    merged.filled.push(...r.filled);
+    merged.review.push(...r.review);
+    merged.skippedFilled += r.skippedFilled;
+    merged.controls += r.controls;
+    merged.attached = merged.attached || r.attached;
+  }
+  return merged;
+}
+
+export async function collectQuestions(tab) {
+  assertScriptable(tab);
+  await inject(tab.id);
+  const lists = await runInFrames(tab.id, () => window.__jobpilot.collectQuestions());
+  return lists.flat();
+}
+
+export async function fillAnswers(tab, answers) {
+  const counts = await runInFrames(tab.id, (a) => window.__jobpilot.fillAnswers(a), [answers]);
+  return counts.reduce((a, b) => a + b, 0);
+}

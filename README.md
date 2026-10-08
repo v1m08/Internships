@@ -1,0 +1,107 @@
+# JobPilot
+
+A Chrome extension that makes applying to internships fast:
+
+1. **Upload your resume once.** Claude turns it into editable boxes (sections, entries, bullets, skills).
+2. **Browse jobs** in the side panel. The list is pulled from the SimplifyJobs Summer 2027 internship list, and you can mark jobs as applied.
+3. **Tailor per job.** Claude reads the posting and suggests rewording and reordering of your *existing* bullets and skills to match its keywords. You approve each change, and it never invents experience.
+4. **Autofill.** On the application page it fills your name, contact info, school, links, work authorization, sponsorship and EEO answers, and attaches the tailored PDF, named like `Alex_Rivera_Resume_Stripe.pdf`.
+5. **Answer the real questions.** Claude drafts answers to "Why this company?" style questions. They're highlighted purple so you can review them before you click Submit.
+
+Downloads go to `Downloads/Resumes/` and overwrite files with the same name, so you never end up with `Resume (100).pdf`.
+
+## Resume format: Jake's Resume
+
+Every PDF uses [Jake's Resume](https://github.com/jakegut/resume) LaTeX template (MIT). `extension/lib/latex.js` turns the resume JSON into `.tex` deterministically: the same JSON always gives the same file.
+
+- **Exact LaTeX output:** if you use the Claude Code bridge and have a TeX engine installed (MacTeX on Mac, MiKTeX on Windows, TeX Live, or Tectonic), JobPilot compiles the `.tex` on your computer with `pdflatex`. Run `brew install --cask mactex-no-gui`, or `brew install tectonic` for something smaller.
+- **No LaTeX installed:** JobPilot draws the same layout itself in Computer Modern (the LaTeX font), so it looks nearly identical.
+- **Resume tab:** *Download .tex* gives you the source, and *Open in Overleaf* opens it as a new Overleaf project.
+
+## Install (about 2 minutes)
+
+1. Clone this repo: `git clone https://github.com/v1m08/Internships.git JobPilot`. (A clone lets JobPilot update itself. **Code → Download ZIP** also works, but then you update by hand.)
+2. In Chrome, go to `chrome://extensions` and turn on **Developer mode** (top right).
+3. Click **Load unpacked** and select the `extension` folder.
+4. Pin the extension (puzzle icon → pin **JobPilot**). Click it, or press **Alt+J**, to open the side panel.
+
+It also works in Brave, Edge and Arc (all Chromium-based).
+
+## Set up
+
+### 1. Connect Claude (pick one)
+
+**Option A: your Claude Pro/Max subscription, via Claude Code (no API key)**
+
+JobPilot can't sign in with your Claude account directly; Anthropic only allows subscription logins inside Claude Code and claude.ai. Instead, a small bridge lets the extension ask **Claude Code on your computer** (`claude -p`) to do the AI work, so it uses your plan's normal usage limits.
+
+1. Install [Claude Code](https://claude.com/claude-code) and [Node.js](https://nodejs.org) if you don't have them. Run `claude` once in a terminal and log in.
+2. In a terminal, `cd` into this folder (the one containing `extension/` and `bridge/`) and run:
+   ```
+   node bridge/install.js
+   ```
+   Or just ask Claude Code: *"run node bridge/install.js"*.
+3. Restart your browser. In JobPilot → **Settings → Connect Claude**, choose **My Claude subscription** and click **Save & test**.
+
+The installer copies the bridge to `~/.jobpilot/bridge` and registers it with Chrome, Brave, Edge, Arc and Chromium (on Windows, under the current user's registry). Only the JobPilot extension can talk to it. To remove it: `node bridge/install.js --uninstall`. If you install or move Claude Code later, re-run the installer.
+
+**Option B: an Anthropic API key (pay-as-you-go)**
+
+Choose **Anthropic API key** in Settings and paste a key from [console.anthropic.com → API Keys](https://console.anthropic.com/settings/keys) (add a few dollars of credit under Billing). Tailoring costs roughly 5–15¢ per job on Opus 5.5, about half that on Sonnet 5.5.
+
+### 2. Upload your resume
+
+**Resume → Upload your resume (PDF).** Check the parsed boxes.
+
+### 3. Check your profile
+
+**Settings → Application profile / Standard answers.** These are pre-filled from your resume; check work authorization, sponsorship and the other standard answers.
+
+### 4. Updates
+
+JobPilot checks this repo for new commits every few hours and puts a **↑** badge on its icon when there's an update. Set it up in **Settings → Updates**:
+
+- **Install automatically when the browser starts**, **Show a notice** (the default: an *Update now* button in the panel), or **Don't check**.
+- **Repo / branch**: defaults to `v1m08/Internships` on `main`. If you fork JobPilot, point this at your fork.
+
+One-click updates need a `git clone` and the Claude Code bridge installed from inside it (`node bridge/install.js`). The bridge runs `git pull --ff-only` in that folder, refreshes its own copy, and the extension reloads. Without the bridge, or with a ZIP download, JobPilot just tells you a newer version is out: run `git pull` (or re-download), then click reload on JobPilot in `chrome://extensions`.
+
+Updates never touch your data. Your resume, profile and settings live in the browser, not in the repo folder.
+
+## Daily flow
+
+**Jobs** tab → click a job → **Apply** tab → **Tailor** → **Autofill this page** (click the site's *Apply* button first if the form is on another page) → **Draft answers** → review → Submit on the site → **Mark as applied**.
+
+Colors on the page: **green** = filled, **amber** = needs you, **purple** = AI draft to review.
+
+## What works where
+
+| Site | Autofill | Resume attach |
+|---|---|---|
+| Greenhouse (classic and new boards, embedded iframes) | ✓ | ✓ |
+| Lever | ✓ | ✓ |
+| Ashby | ✓ | ✓ |
+| Workday | Partial: one step at a time, so click Autofill on each page | Usually |
+| Anything else | Best effort, label-based | Best effort |
+
+Multi-page forms: click **Autofill this page** again on each step.
+
+## Privacy
+
+Everything (resume, profile, API key, applied list) is stored in `chrome.storage.local` in your browser profile. Data only leaves your machine when you use an AI feature, and then it goes only to Anthropic, either through Claude Code on your computer or through the API.
+
+## Development
+
+```
+extension/          the unpacked extension (no build step needed)
+  sidepanel/        UI (vanilla JS modules)
+  content/          autofill engine injected into job pages
+  lib/              AI calls, LaTeX generator (latex.js), PDF rendering, storage, job list, updater
+  fonts/            CMU Serif (Computer Modern, SIL OFL) for the built-in renderer
+  vendor/           bundled @anthropic-ai/sdk and jsPDF
+bridge/             native messaging host that runs Claude Code (`claude -p`), compiles LaTeX, and pulls updates; plus its installer
+```
+
+Bump `version` in `extension/manifest.json` when you ship something, so people without the bridge get notified. People with the bridge see every new commit.
+
+Nothing personal belongs in this repo: all user data stays in `chrome.storage.local`, and defaults live in `extension/lib/store.js`.

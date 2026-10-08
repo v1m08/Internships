@@ -1,0 +1,8 @@
+.DS_Store
+node_modules/
+*.pem
+*.crx
+# Personal files that shouldn't end up in a public repo
+*.pdf
+*.tex
+.env*
