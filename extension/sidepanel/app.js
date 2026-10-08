@@ -8,6 +8,7 @@ import * as Page from "../lib/page.js";
 import * as Update from "../lib/update.js";
 import * as L from "../lib/layout.js";
 import * as G from "../lib/grad.js";
+import { resolveStuck } from "../lib/resolve.js";
 import * as Sources from "../lib/sources.js";
 import * as Autopilot from "../lib/autopilot.js";
 import * as Ans from "../lib/answers.js";
@@ -456,7 +457,7 @@ function fillCard(hasResume) {
   const card = h("div", { class: "card" }, h("h3", {}, h("span", { class: "step" }, "2"), "Fill the application"));
   const file = hasResume ? { name: resumeNameForJob() } : null;
   card.append(
-    h("p", { class: "muted small" }, "Fills in your name, contact details, school, links and standard questions, and attaches ", file ? h("strong", {}, file.name) : "your resume", ". Already-filled fields are left alone."),
+    h("p", { class: "muted small" }, "Fills in your name, contact details, school, links and standard questions, and attaches ", file ? h("strong", {}, file.name) : "your resume", ". If it gets stuck on a field, Claude picks the matching option from your profile; anything that needs your own words is left for you. Already-filled fields are left alone."),
     h("button", { class: "btn primary block", onclick: doAutofill, disabled: S.busy.fill }, S.busy.fill ? [spinner(), " Filling…"] : "Autofill this page")
   );
   const r = S.report;
@@ -477,7 +478,22 @@ function fillCard(hasResume) {
 async function doAutofill() {
   await withBusy("fill", async () => {
     const file = await resumeFileForJob();
-    S.report = await Page.autofill(S.tab, { profile: profileForJob(), resumeFile: file });
+    const profile = profileForJob();
+    const report = await Page.autofill(S.tab, { profile, resumeFile: file });
+    // Then one short Claude pass for whatever the rules couldn't fill.
+    if (aiReady() && report.controls) {
+      try {
+        const posting = S.posting[S.job?.key]?.text || "";
+        const r = await resolveStuck(S.tab, { settings: S.settings, profile, resumeText: resumeToText(currentTailored()?.resume || S.base), posting });
+        const done = new Set([...r.filled, ...r.drafted].map((x) => x.label));
+        report.review = report.review.filter((x) => !done.has(x.label));
+        report.filled.push(...r.filled.map((x) => ({ ...x, value: `${x.value} (matched by Claude)` })), ...r.drafted.map((x) => ({ ...x, value: `${x.value} (Claude's pick, purple)` })));
+        for (const x of r.skipped) if (!report.review.some((y) => y.label === x.label)) report.review.push(x);
+      } catch (e) {
+        report.review.push({ label: "Claude", reason: `Couldn't finish the stuck fields: ${e.message}` });
+      }
+    }
+    S.report = report;
   });
 }
 
@@ -1610,6 +1626,7 @@ function renderSettings() {
       h("div", { class: "grid2" }, pf("gradEarliest", "Earliest", "December 2028"), pf("gradLatest", "Latest", "May 2030"))
     ),
     h("div", { class: "grid2" }, pf("gpa", "GPA", "optional"), pf("availableStart", "Available to start", "May 2027")),
+    h("div", { class: "grid2" }, pf("schoolStart", "Started school", "August 2026"), h("div")),
     h("div", { class: "grid2" }, pf("currentCompany", "Current company", "defaults to school"), pf("currentTitle", "Current title"))
   );
 

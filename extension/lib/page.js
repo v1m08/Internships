@@ -16,7 +16,11 @@ function assertScriptable(tab) {
 }
 
 async function inject(tabId) {
-  await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content/autofill.js"] });
+  await Promise.all([
+    chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content/autofill.js"] }),
+    // Page-world helper for react-select dropdowns (see content/mainworld.js).
+    chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content/mainworld.js"], world: "MAIN" }).catch(() => {}),
+  ]);
 }
 
 async function runInFrames(tabId, func, args = []) {
@@ -55,10 +59,11 @@ export async function autofill(tab, payload) {
   return merged;
 }
 
-export async function collectQuestions(tab) {
+// opts: { stuck, profile } (see collectQuestions in content/autofill.js)
+export async function collectQuestions(tab, opts = {}) {
   assertScriptable(tab);
   await inject(tab.id);
-  const lists = await runInFrames(tab.id, () => window.__jobpilot.collectQuestions());
+  const lists = await runInFrames(tab.id, (o) => window.__jobpilot.collectQuestions(o), [opts]);
   return lists.flat();
 }
 

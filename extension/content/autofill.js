@@ -174,6 +174,11 @@
     { key: "major", re: /major|discipline|field of study|area of study|concentration/ },
     { key: "degree", re: /degree|level of (study|education)|education level/ },
     { key: "gpa", re: /\bgpa\b|grade point/ },
+    // Education blocks (Greenhouse, Lever): dates of the degree, not the job.
+    { key: "eduStartMonth", re: /^start (date )?month$|^(education |school )?start month/ },
+    { key: "eduStartYear", re: /^start (date )?year$|^(education |school )?start year/ },
+    { key: "eduEndMonth", re: /^end (date )?month$|^(education |school )?end month|graduation month/ },
+    { key: "eduEndYear", re: /^end (date )?year$|^(education |school )?end year|graduation year/ },
     { key: "gradDate", re: /graduat|grad (date|year)|class of|completion date/ },
     { key: "currentCompany", re: /current (company|employer)|^company$|^org$|^organization$|most recent (company|employer)/ },
     { key: "currentTitle", re: /current (title|role|position)/ },
@@ -254,6 +259,10 @@
       degree: p.degree,
       gpa: p.gpa,
       gradDate: gd,
+      eduStartMonth: (p.schoolStart || "").split(" ")[0],
+      eduStartYear: (p.schoolStart || "").split(" ")[1],
+      eduEndMonth: p.gradMonth,
+      eduEndYear: p.gradYear,
       currentCompany: p.currentCompany || p.school,
       currentTitle: p.currentTitle,
       workAuth: yn(p.workAuthorized),
@@ -308,6 +317,16 @@
       return i;
     }
     if (DECLINE_RE.test(v)) return texts.findIndex((t) => DECLINE_RE.test(t));
+    if (key === "degree") {
+      // "Bachelor of Science" / "B.S." -> "Bachelor's Degree"
+      const level = /^(b ?s|b ?a|bachelor)/.test(v) ? /bachelor/ : /^(m ?s|m ?a|master)/.test(v) ? /master/ : /ph ?d|doctor/.test(v) ? /ph ?d|doctor of philosophy/ : /associate/.test(v) ? /associate/ : null;
+      if (level) {
+        const exact = texts.findIndex((t) => level.test(t) && t.includes(v));
+        if (exact >= 0) return exact;
+        const i = texts.findIndex((t) => level.test(t));
+        if (i >= 0) return i;
+      }
+    }
     let i = texts.findIndex((t) => t === v);
     if (i < 0) i = texts.findIndex((t) => t.startsWith(v));
     if (i < 0) i = texts.findIndex((t) => t.includes(v));
@@ -344,6 +363,7 @@
       const opt = el.options[el.selectedIndex];
       return !opt || !opt.value || /^(select|choose|please|--)/i.test(clean(opt.textContent));
     }
+    if (isCombobox(el)) return !comboHasValue(el) && !String(el.value || "").trim();
     return !String(el.value || "").trim();
   }
 
@@ -387,9 +407,82 @@
     });
   }
 
-  // React-select style dropdowns (new Greenhouse boards, Ashby, Workday).
+  // ------------------------------------------------ react-select bridge
+  // Dropdowns built with react-select are read and set through their own
+  // props by content/mainworld.js (page world). Falls back to clicking.
+
+  let tokenSeq = 0;
+  function react(op, el, extra = {}, timeoutMs = 1500) {
+    if (!el.dataset.jobpilotToken) el.dataset.jobpilotToken = `t${Date.now().toString(36)}${tokenSeq++}`;
+    const id = `${el.dataset.jobpilotToken}-${tokenSeq++}`;
+    return new Promise((resolve) => {
+      const done = (r) => {
+        document.removeEventListener("jobpilot:react:result", onResult);
+        clearTimeout(timer);
+        resolve(r);
+      };
+      const onResult = (e) => {
+        let d;
+        try {
+          d = JSON.parse(e.detail);
+        } catch {
+          return;
+        }
+        if (d.id === id) done(d);
+      };
+      const timer = setTimeout(() => done(null), timeoutMs);
+      document.addEventListener("jobpilot:react:result", onResult);
+      document.dispatchEvent(new CustomEvent("jobpilot:react", { detail: JSON.stringify({ id, op, token: el.dataset.jobpilotToken, ...extra }) }));
+    });
+  }
+
+  // What to type into a searchable dropdown: the full value, then shorter.
+  function queriesFor(value) {
+    const v = String(value || "").trim();
+    const words = v.split(/\s+/);
+    return [...new Set([v, words.slice(0, 3).join(" "), words[0]].filter((q) => q && q.length >= 2))];
+  }
+
+  // Options of a dropdown without opening it ([] if unknown).
+  async function comboOptions(el) {
+    const r = await react("options", el);
+    return r && r.ok ? r.labels : [];
+  }
+
+  // -> true, or false with el.__jpOptions set to what was offered.
   async function fillCombobox(el, value, key) {
+    const want = Array.isArray(value) ? value : [value];
+    const r = await react("options", el);
+    if (r && r.ok) {
+      let labels = r.labels;
+      let query;
+      const pick = () => want.map((w) => labels[bestOption(labels, w, key)]).filter(Boolean);
+      let picks = pick();
+      if (!picks.length && r.async) {
+        for (const q of queriesFor(want[0])) {
+          const s2 = await react("search", el, { query: q }, 9000);
+          if (!s2 || !s2.ok) break;
+          labels = s2.labels;
+          query = q;
+          picks = pick();
+          if (picks.length) break;
+        }
+      }
+      el.__jpOptions = labels;
+      if (!picks.length) return false;
+      const sel = await react("select", el, { labels: r.multi ? picks : picks.slice(0, 1), query }, 9000);
+      if (!sel || !sel.ok) return false;
+      // Wait for React to show the choice, so later checks see it as filled.
+      for (let t = 0; t < 10 && !comboHasValue(el); t++) await sleep(50);
+      return true;
+    }
+    return fillComboboxByClicking(el, want[0], key);
+  }
+
+  // Other combobox widgets (Workday, custom): open, type, click an option.
+  async function fillComboboxByClicking(el, value, key) {
     el.focus();
+    el.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
     el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
     el.click();
     await sleep(150);
@@ -398,11 +491,14 @@
     if (i < 0) {
       const typed = /^(yes|no)$/i.test(value) ? value : value.slice(0, 30);
       setNativeValue(el, typed);
-      await sleep(450);
-      opts = visibleOptions();
-      i = bestOption(opts.map((o) => o.textContent), value, key);
+      for (let t = 0; t < 8 && i < 0; t++) {
+        await sleep(250);
+        opts = visibleOptions();
+        i = bestOption(opts.map((o) => o.textContent), value, key);
+      }
     }
     if (i < 0) {
+      el.__jpOptions = opts.map((o) => clean(o.textContent));
       el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       setNativeValue(el, "");
       el.blur();
@@ -413,6 +509,12 @@
     await sleep(100);
     el.blur();
     return true;
+  }
+
+  // react-select shows its value in a sibling, not in the input.
+  function comboHasValue(el) {
+    const ctl = el.closest('[class*="control" i]');
+    return !!ctl?.querySelector('[class*="single-value" i], [class*="singleValue" i], [class*="multi-value" i], [class*="multiValue" i]');
   }
 
   function base64ToFile(file) {
@@ -432,8 +534,15 @@
 
   // ----------------------------------------------------------- main fill
 
+  // react-select keeps an invisible required <input> next to each dropdown;
+  // it isn't a field of its own.
+  function isShadowInput(el) {
+    if (el.getAttribute("aria-hidden") === "true") return true;
+    return el.tabIndex === -1 && getComputedStyle(el).opacity === "0" && el.type !== "file";
+  }
+
   function controls() {
-    return [...document.querySelectorAll(CONTROL_SEL)].filter((el) => !el.disabled && !el.readOnly && isVisible(el));
+    return [...document.querySelectorAll(CONTROL_SEL)].filter((el) => !el.disabled && !el.readOnly && isVisible(el) && !isShadowInput(el));
   }
 
   async function fill({ profile, resumeFile }) {
@@ -523,8 +632,10 @@
   // ---------------------------------------------------- open questions
 
   // Unfilled controls that look like real application questions (not
-  // profile fields), for the AI to draft answers to.
-  function collectQuestions() {
+  // profile fields), for the AI to draft answers to. With { stuck: true },
+  // also profile fields the first pass couldn't fill (no matching option, no
+  // saved value), with what we wanted to put there.
+  async function collectQuestions({ stuck = false, profile = null } = {}) {
     // Ids restart at 0 each call, so drop old ones to avoid duplicates.
     document.querySelectorAll(`[${QID_ATTR}]`).forEach((n) => n.removeAttribute(QID_ATTR));
     const out = [];
@@ -541,7 +652,8 @@
       const label = labelFor(el);
       if (!label || label.length < 4) continue;
       const key = classify(el, label);
-      if (key) continue;
+      if (key === "skip") continue;
+      if (key && !stuck) continue;
       const required = isRequired(el, label);
       let kind, options;
       if (isGroup) {
@@ -553,25 +665,32 @@
       } else {
         if (!isEmpty(el)) continue;
         if (el instanceof HTMLSelectElement) {
-          kind = "single_choice";
+          kind = el.multiple ? "multi_choice" : "single_choice";
           options = [...el.options].map((o) => clean(o.textContent)).filter((t) => t && !/^(select|choose|please|--)/i.test(t));
         } else if (el instanceof HTMLTextAreaElement) {
           kind = "long_text";
         } else if (isCombobox(el)) {
+          options = el.__jpOptions || (await comboOptions(el));
           kind = "dropdown";
         } else {
-          if (!/\?/.test(label) && label.length < 25 && !required) continue;
-          kind = "short_text";
+          if (!key && !/\?/.test(label) && label.length < 25 && !required) continue;
+          kind = el.type === "number" ? "number" : "short_text";
         }
       }
       // Stable ids (same page → same ids) so cached AI answers can be reused.
       const qid = `${location.host}${location.pathname}#${n++}`;
       el.setAttribute(QID_ATTR, qid);
-      out.push({ qid, question: label.slice(0, 500), kind, options: options || [], required });
+      const q = { qid, question: label.slice(0, 500), kind, options: (options || []).slice(0, 80), required };
+      if (key) {
+        q.field = key;
+        if (profile) q.wanted = valueFor(key, profile);
+      }
+      out.push(q);
     }
     return out;
   }
 
+  // answers: [{ qid, answer, mark?: "filled" | "draft", note? }]
   async function fillAnswers(answers) {
     let count = 0;
     for (const a of answers) {
@@ -579,18 +698,21 @@
       if (!el || !a.answer) continue;
       let ok = false;
       try {
-        if (el.type === "radio" || el.type === "checkbox") ok = fillRadio(radioGroup(el), a.answer, null);
-        else if (el instanceof HTMLSelectElement) ok = fillSelect(el, a.answer, null);
-        else if (isCombobox(el)) ok = await fillCombobox(el, a.answer, null);
+        const values = Array.isArray(a.answer) ? a.answer : [a.answer];
+        if (el.type === "radio" || el.type === "checkbox") {
+          const group = radioGroup(el);
+          ok = values.map((v) => fillRadio(group, v, null)).some(Boolean);
+        } else if (el instanceof HTMLSelectElement) ok = fillSelect(el, values[0], null);
+        else if (isCombobox(el)) ok = await fillCombobox(el, values, null);
         else {
-          setNativeValue(el, a.answer);
+          setNativeValue(el, values[0]);
           ok = true;
         }
       } catch {
         ok = false;
       }
       if (ok) {
-        mark(el, "draft", "AI draft — review before submitting");
+        mark(el, a.mark || "draft", a.note || "AI draft — review before submitting");
         count++;
       } else {
         mark(el, "review", "AI suggestion didn't fit this field");

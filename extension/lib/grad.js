@@ -153,9 +153,13 @@ export function windowFromAI(g) {
 }
 
 // The profile to use for one job's application.
+// Also fills in when the degree started (asked by Greenhouse's education
+// block) if the profile doesn't say: four years before the usual graduation.
 export function profileWithGrad(profile, date) {
-  if (date === null || date === undefined) return profile;
-  return { ...profile, gradMonth: formatDate(date).split(" ")[0], gradYear: String(yearOf(date)) };
+  let p = profile;
+  if (!p.schoolStart && Number(p.gradYear)) p = { ...p, schoolStart: `August ${Number(p.gradYear) - 4}` };
+  if (date === null || date === undefined) return p;
+  return { ...p, gradMonth: formatDate(date).split(" ")[0], gradYear: String(yearOf(date)) };
 }
 
 // Education-line change: replace the default graduation date with `date`,

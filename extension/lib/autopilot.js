@@ -16,6 +16,8 @@
 //   manual     site needs an account (Workday etc.); not opened
 //   failed     error
 import * as G from "./grad.js";
+import { resolveStuck } from "./resolve.js";
+import { resumeToText } from "./pdf.js";
 import * as Page from "./page.js";
 import { prepareJob, tailoredEntry } from "./tailor.js";
 
@@ -61,6 +63,12 @@ export async function runJob(job, ctx) {
     const profile = G.profileWithGrad(ctx.profile, existing ? existing.grad : G.gradForJob(ctx.profile, posting?.text, job.title)?.date);
     step("Filling");
     const firstPass = await Page.autofill(tab, { profile, resumeFile: null });
+    // Fields the rules couldn't fill: one short Claude pass (options and facts
+    // only; anything needing your own words stays for the steps below).
+    try {
+      const r = await resolveStuck(tab, { settings: ctx.settings, profile, resumeText: resumeToText(ctx.base), posting: posting?.text || "" });
+      firstPass.filled.push(...r.filled, ...r.drafted);
+    } catch {}
     const questions = await Page.collectQuestions(tab);
 
     // Tailor + answer (deterministic first, one AI call for the rest).

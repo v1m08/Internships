@@ -48,6 +48,7 @@ export const DEFAULT_PROFILE = {
   gradMonth: "",
   gradYear: "",
   // Flexible graduation window ("December 2028" … "May 2030"); empty = fixed.
+  schoolStart: "", // "August 2026"; estimated from graduation when empty
   gradEarliest: "",
   gradLatest: "",
   currentCompany: "",

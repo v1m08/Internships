@@ -280,3 +280,37 @@ export async function rewriteAndAnswer(settings, { bullets, keywords, posting, q
   const effort = questions.some((q) => q.kind === "long_text") ? "medium" : "low";
   return callJSON(settings, { system: JOB_SYSTEM, content, schema: JOB_SCHEMA, effort });
 }
+
+// --------------------------------------------- unsticking autofill
+// After the rule-based fill, one short call for the fields it couldn't do:
+// pick the matching option (Degree "Bachelor's Degree" for "Bachelor of
+// Science"), fill factual short fields, choose preference dropdowns. Fields
+// that need the student's own writing are labeled "writing" and left empty.
+
+const RESOLVE_SCHEMA = obj({
+  fields: arr(obj({ qid: str, answer: arr(str), basis: { type: "string", enum: ["fact", "preference", "writing", "unknown"] } })),
+});
+
+const RESOLVE_SYSTEM = `You finish a job application form for a student. Each field below is still empty after automatic filling. For each one return:
+- answer: the value(s) to enter. For fields with options, copy the option text exactly (several only for multi_choice, or a dropdown that clearly allows several). For a dropdown with no options listed, give the text to search for (e.g. the school's official name). For number fields, digits only.
+- basis:
+  "fact" = taken directly from the profile or resume, or an option that means the same thing as a profile value ("wanted" is what the profile says).
+  "preference" = a choice the student would plausibly make that the profile doesn't state outright (e.g. which internship term, a team, a shift), picked to fit the posting and resume.
+  "writing" = needs the student's own words (why this company, describe a project, cover-letter style text, anything opinion or motivation). Return answer [] for these.
+  "unknown" = a fact you don't have (referral name, ID numbers, salary, a date not in the profile). Return answer [].
+Never invent facts. Keep answers short.`;
+
+// fields: [{ qid, question, kind, options, required, field?, wanted? }]
+export async function resolveFields(settings, { fields, profile, resumeText, posting }) {
+  if (!fields.length) return [];
+  const content = [
+    posting ? `<job>\n${posting.slice(0, 6000)}\n</job>` : "",
+    `<profile>${JSON.stringify(profile)}</profile>`,
+    `<resume>\n${resumeText.slice(0, 8000)}\n</resume>`,
+    `<fields>\n${JSON.stringify(fields.map(({ qid, question, kind, options, required, wanted }) => ({ qid, question, kind, options, required, wanted })))}\n</fields>`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const out = await callJSON(settings, { system: RESOLVE_SYSTEM, content, schema: RESOLVE_SCHEMA, effort: "low" });
+  return out.fields || [];
+}
