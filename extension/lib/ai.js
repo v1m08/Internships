@@ -368,3 +368,29 @@ export async function applyFeedback(settings, { fields, feedback, instructions =
     .join("\n\n");
   return callJSON(settings, { system: FEEDBACK_SYSTEM, content, schema: FEEDBACK_SCHEMA, effort: "low" });
 }
+
+// ------------------------------------------------ what jobs to look for
+// Read once from the resume (and redone when it changes). fit.js scores
+// every listing against it without AI.
+
+const TARGET_SCHEMA = obj({
+  summary: str,
+  categories: arr({ type: "string", enum: ["Software", "AI/ML/Data", "Quant", "Product", "Hardware"] }),
+  include: arr(str),
+  exclude: arr(str),
+  degree: { type: "string", enum: ["Bachelor's", "Master's", "PhD"] },
+});
+
+const TARGET_SYSTEM = `You decide which internship listings are realistic for a student, from their resume and profile. Listings are filtered by title words and by a category (Software, AI/ML/Data, Quant, Product, Hardware).
+
+Return:
+- summary: one sentence, e.g. "Second-year CS student aiming for software and ML internships."
+- categories: the categories worth applying to, based on their major and the bulk of their experience. Be conservative: one hardware-adjacent project or a tool on the skills list doesn't make Hardware a fit for a CS major.
+- include: 8-20 lowercase title words/phrases that mark a strong fit (e.g. "software", "machine learning", "backend", "data science", "research", "full stack").
+- exclude: 8-25 lowercase title words/phrases for roles they can't realistically do given their major and year: other engineering disciplines (e.g. "electrical", "mechanical", "civil", "chemical", "aerospace", "manufacturing", "rf", "analog"), and unrelated functions (e.g. "accounting", "sales", "marketing", "legal", "hr"). Don't exclude anything that appears in include. Don't list degree words (PhD/Master's are handled separately).
+- degree: the degree they're currently pursuing.`;
+
+export async function buildTarget(settings, { resumeText, profile }) {
+  const content = `<profile>${JSON.stringify({ school: profile.school, degree: profile.degree, major: profile.major, gradMonth: profile.gradMonth, gradYear: profile.gradYear })}</profile>\n\n<resume>\n${resumeText.slice(0, 9000)}\n</resume>`;
+  return callJSON(settings, { system: TARGET_SYSTEM, content, schema: TARGET_SCHEMA, effort: "low" });
+}

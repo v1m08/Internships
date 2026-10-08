@@ -3,6 +3,7 @@
 // used by SimplifyJobs, vanshb03, speedyapply and most other lists.
 // No DOM APIs here: this also runs in the background service worker.
 import * as E from "./eligibility.js";
+import { fitOf } from "./fit.js";
 
 export const DEFAULT_SOURCES = [
   { id: "simplify-2027", label: "SimplifyJobs/Summer2027-Internships", input: "SimplifyJobs/Summer2027-Internships", enabled: true },
@@ -65,6 +66,8 @@ export function parseListingsJson(text) {
       sponsorship: j.sponsorship || "",
       // Simplify's own listings have a job page with sponsorship data.
       simplifyId: j.source === "Simplify" ? j.id : "",
+      degrees: j.degrees || [],
+      terms: (j.terms || []).filter((t) => t && t !== "N/A"),
       posted: j.date_posted || j.date_updated || 0,
     }));
 }
@@ -245,6 +248,7 @@ export const DEFAULT_FILTERS = {
   categories: [], // empty = all
   maxAgeDays: 30,
   hideIneligible: true, // hide jobs your U.S. work status rules out (eligibility.js)
+  fitOnly: true, // hide jobs that don't fit your resume (fit.js: degree level, field, term)
 };
 
 const terms = (s) =>
@@ -259,7 +263,8 @@ export function listingVerdict(j, profile, eligCache = {}) {
   return E.verdict([...E.signalsFromListing(j), ...(eligCache[j.id] || [])], profile);
 }
 
-export function matchesFilters(j, f, profile, eligCache = {}) {
+export function matchesFilters(j, f, profile, eligCache = {}, target = null) {
+  if ((f.fitOnly ?? true) && target && fitOf(j, target).level === "no") return false;
   const title = `${j.title}`.toLowerCase();
   const all = `${j.company} ${j.title}`.toLowerCase();
   const inc = terms(f.include);

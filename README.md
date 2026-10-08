@@ -115,6 +115,17 @@ Wherever Claude did something, there's a way to say what to change:
 
 Tick **Remember this for every application** and the note becomes a standing instruction (**Settings → Instructions for Claude**) used on every job, including Autopilot runs. The no-AI-writing rule still holds: Claude can change options and facts, or paste text you typed in the note, but it won't write an answer itself.
 
+## Jobs that fit your resume
+
+When your resume is parsed, Claude reads it once and decides what you should be looking for: the categories (Software, AI/ML/Data, Quant, Product, Hardware), title words that mean a strong fit, title words that rule a role out (other engineering disciplines, unrelated functions), and the degree you're pursuing. It's in **Settings → What jobs to look for**, where you can change anything or have it re-read your resume.
+
+Every listing is then scored against it without AI:
+
+- **Not a fit** (hidden by **Filters → Only jobs that fit my resume**, on by default): the listing is only for Master's/PhD students (from Simplify's degree data or the title, e.g. "MS/PhD"), its term already started (a Fall 2026 co-op in October 2026), it's in a field you ruled out, or it's in a category you don't target.
+- **★ Good fit**: your category and a strong title match. **~ Stretch**: another category, but clearly your kind of role (e.g. a software role filed under Hardware).
+
+Good fits are listed first, so Autopilot starts with them. Autopilot also checks each posting's text and skips ones that require a graduate program as *Not a fit* (Try again if you want to apply anyway).
+
 ## Can you apply? (work authorization)
 
 Set **Settings → Application profile → U.S. work status** (citizen, permanent resident, other authorization, student visa with CPT/OPT, or not authorized) and whether you hold a security clearance. JobPilot then marks every job:

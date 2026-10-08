@@ -15,6 +15,7 @@
 //   needs-you  blocker (CAPTCHA, login, missing required field, no confirmation)
 //   manual     site needs an account (Workday etc.); not opened
 //   ineligible your U.S. work status rules it out (eligibility.js); tab closed
+//   notfit     the posting requires a degree program you're not in (fit.js)
 //   failed     error
 import * as G from "./grad.js";
 import { resolveStuck, fixInvalid, fixWithFeedback } from "./resolve.js";
@@ -64,6 +65,15 @@ export async function runJob(job, ctx) {
     }
 
     if (!posting) posting = await Page.readJobPosting(tab).catch(() => ({ text: "" }));
+
+    // A fit at all? Postings that require a graduate program are skipped.
+    if (ctx.fit && !ctx.force) {
+      const f = ctx.fit(job, posting?.text || "");
+      if (f?.level === "no") {
+        await chrome.tabs.remove(tab.id).catch(() => {});
+        return { status: "notfit", note: `${f.reasons[0]}. Try again if you want to apply anyway.` };
+      }
+    }
 
     // Can you apply at all? Don't fill applications your status rules out.
     if (ctx.eligibility) {

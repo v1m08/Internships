@@ -1,5 +1,6 @@
 // Thin wrappers over chrome.storage.local. Everything stays on this device.
 import { DEFAULT_SOURCES, DEFAULT_FILTERS } from "./sources.js";
+import { DEFAULT_TARGET } from "./fit.js";
 
 export const DEFAULT_AUTOPILOT = {
   autoSubmit: true, // submit when no typed answer had to be written (you allowed this)
@@ -27,6 +28,7 @@ export const DEFAULT_SETTINGS = {
   updateRepo: "v1m08/Internships",
   updateBranch: "main",
   autoUpdate: "ask", // "auto" | "ask" | "off"
+  target: DEFAULT_TARGET, // what jobs to look for, read from your resume (fit.js)
   instructions: "", // standing instructions for Claude, one per line (Settings → Instructions for Claude)
   coverAttach: "any", // attach your cover letter to "any" cover letter field | "required" ones only | "off"
 };
@@ -87,6 +89,7 @@ export async function getSettings() {
   const s = { ...DEFAULT_SETTINGS, ...(await get("settings", {})) };
   s.filters = { ...DEFAULT_FILTERS, ...s.filters };
   s.autopilot = { ...DEFAULT_AUTOPILOT, ...s.autopilot };
+  s.target = { ...DEFAULT_TARGET, ...s.target };
   return s;
 }
 

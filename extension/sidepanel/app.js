@@ -11,6 +11,7 @@ import * as G from "../lib/grad.js";
 import { resolveStuck, fixWithFeedback } from "../lib/resolve.js";
 import * as C from "../lib/cover.js";
 import * as E from "../lib/eligibility.js";
+import * as Fit from "../lib/fit.js";
 import * as Sources from "../lib/sources.js";
 import * as Autopilot from "../lib/autopilot.js";
 import * as Ans from "../lib/answers.js";
@@ -197,10 +198,19 @@ async function refreshContext() {
     Page.readJobPosting(tab)
       .then((p) => {
         S.eligPage[job.key] = E.signalsFromText(p.text);
+        S.posting[job.key] ||= p;
         if (S.job?.key === job.key && S.activeTab === "apply") renderApply();
       })
       .catch(() => {});
   }
+}
+
+// "Not a fit" note on the Apply tab (listing data, then the posting text).
+function fitNotice() {
+  const listing = S.jobsByKey.get(S.job.key);
+  const f = (listing && Fit.fitOf(listing, S.settings.target).level === "no" && Fit.fitOf(listing, S.settings.target)) || Fit.fitFromPosting(S.posting[S.job.key]?.text || "", S.settings.target);
+  if (!f || f.level !== "no") return null;
+  return h("div", { class: "notice warn", style: { marginTop: "8px" } }, h("strong", {}, "Probably not a fit: "), f.reasons[0]);
 }
 
 // Can-you-apply box under the job title on the Apply tab.
@@ -349,7 +359,8 @@ function renderApply() {
       S.saved[S.job.key]
         ? textarea({ rows: 1, value: S.saved[S.job.key].note, placeholder: "Note for later (e.g. needs a take-home project first)", style: { marginTop: "6px" }, oninput: (e) => ((S.saved[S.job.key].note = e.target.value), saveSaved()) })
         : null,
-      eligNotice()
+      eligNotice(),
+      fitNotice()
     )
   );
 
@@ -770,16 +781,21 @@ function withKeys(cache) {
   return cache;
 }
 
+// Best fits first (then newest), so Autopilot also starts with them.
 function filteredJobs() {
   const terms = S.jobsQuery.toLowerCase().trim().split(/\s+/).filter(Boolean);
   const f = S.settings.filters;
-  return S.jobsCache.items.filter((j) => {
+  const target = S.settings.target;
+  const list = S.jobsCache.items.filter((j) => {
     if (S.hideApplied && S.applied[j.key]) return false;
-    if (!Sources.matchesFilters(j, f, S.profile, S.eligSignals)) return false;
+    if (!Sources.matchesFilters(j, f, S.profile, S.eligSignals, target)) return false;
     if (!terms.length) return true;
     const hay = `${j.company} ${j.title} ${j.locations.join(" ")}`.toLowerCase();
     return terms.every((t) => hay.includes(t));
   });
+  if (!target.categories?.length) return list;
+  const rank = new Map(list.map((j) => [j, Fit.FIT_RANK[Fit.fitOf(j, target).level]]));
+  return list.sort((a, b) => rank.get(a) - rank.get(b) || b.posted - a.posted);
 }
 
 function renderJobs() {
@@ -847,7 +863,8 @@ function renderJobs() {
         "div",
         { class: "row" },
         h("select", { style: { width: "auto" }, onchange: (e) => setF("maxAgeDays", Number(e.target.value)) }, [7, 14, 30, 90, 0].map((d) => h("option", { value: d, selected: f.maxAgeDays === d }, d ? `Posted in last ${d} days` : "Any age"))),
-        h("label", { class: "row" }, h("input", { type: "checkbox", checked: f.hideIneligible ?? f.respectSponsorship, onchange: (e) => setF("hideIneligible", e.target.checked) }), "Hide jobs I can't apply to (from my U.S. work status)")
+        h("label", { class: "row" }, h("input", { type: "checkbox", checked: f.hideIneligible ?? f.respectSponsorship, onchange: (e) => setF("hideIneligible", e.target.checked) }), "Hide jobs I can't apply to (from my U.S. work status)"),
+        h("label", { class: "row" }, h("input", { type: "checkbox", checked: f.fitOnly ?? true, onchange: (e) => setF("fitOnly", e.target.checked) }), "Only jobs that fit my resume (Settings → What jobs to look for)")
       )
     )
   );
@@ -885,6 +902,19 @@ function renderJobs() {
     listWrap
   );
   update();
+}
+
+// --------------------------------------------- what jobs to look for
+
+// One Claude call: your resume -> the kinds of roles that fit (fit.js).
+async function buildTargetFromResume({ quiet = false } = {}) {
+  if (!aiReady() || !hasContent(S.base)) return;
+  const t = await AI.buildTarget(S.settings, { resumeText: resumeToText(S.base), profile: S.profile });
+  S.settings.target = { ...Fit.DEFAULT_TARGET, ...t, builtAt: Date.now() };
+  await store.set("settings", S.settings);
+  if (!quiet) toast("Updated what jobs to look for from your resume.");
+  if (S.activeTab === "jobs") renderJobs();
+  if (S.activeTab === "settings") renderSettings();
 }
 
 // ------------------------------------------------------- saved jobs
@@ -1027,12 +1057,14 @@ function renderJobList(wrap, filtered) {
     const tailored = !!S.tailored[j.key];
     const sig = signalsForJob(j);
     const elig = eligPill(E.verdict(sig, S.profile), sig.length > 0 || S.eligSignals[j.id] !== undefined);
+    const fit = Fit.fitOf(j, S.settings.target);
+    const fitPill = Fit.FIT_LABEL[fit.level] ? h("span", { class: `pill ${fit.level === "good" ? "good" : fit.level === "no" ? "bad" : "warn"}`, title: fit.reasons.join("\n") || "Matches what you're looking for" }, Fit.FIT_LABEL[fit.level]) : null;
     return h(
       "div",
       { class: `job${applied ? " applied" : ""}`, onclick: () => openJob(j), title: `${j.url}\n${(j.sources || []).join(", ")}` },
       starButton(j, () => renderJobList(wrap, filtered)),
       h("div", { class: "meta" }, h("div", { class: "company" }, j.company), h("div", { class: "title" }, j.title), h("div", { class: "loc" }, j.locations.join(" · "))),
-      h("div", { style: { textAlign: "right" } }, h("div", { class: "small muted" }, Jobs.ageLabel(j.posted)), applied ? h("span", { class: "pill good" }, "Applied") : tailored ? h("span", { class: "pill" }, "Tailored") : elig)
+      h("div", { style: { textAlign: "right" } }, h("div", { class: "small muted" }, Jobs.ageLabel(j.posted)), applied ? h("span", { class: "pill good" }, "Applied") : tailored ? h("span", { class: "pill" }, "Tailored") : [elig, fitPill])
     );
   });
   const more =
@@ -1073,8 +1105,8 @@ async function refreshJobList() {
 
 // ------------------------------------------------------------- AUTOPILOT
 
-const STATUS_PILL = { queued: "", running: "", applied: "good", review: "info", "needs-you": "warn", manual: "", failed: "bad", ineligible: "bad" };
-const STATUS_LABEL = { queued: "Queued", running: "Working", applied: "Applied", review: "Review & submit", "needs-you": "Needs you", manual: "Apply manually", failed: "Failed", ineligible: "Not eligible" };
+const STATUS_PILL = { queued: "", running: "", applied: "good", review: "info", "needs-you": "warn", manual: "", failed: "bad", ineligible: "bad", notfit: "" };
+const STATUS_LABEL = { queued: "Queued", running: "Working", applied: "Applied", review: "Review & submit", "needs-you": "Needs you", manual: "Apply manually", failed: "Failed", ineligible: "Not eligible", notfit: "Not a fit" };
 // Saved right away: debounce timers get throttled while the run tab is hidden.
 const saveQueue = () => store.set("autopilotQueue", S.queue);
 
@@ -1130,17 +1162,17 @@ function autopilotCard() {
         Object.entries(counts).map(([k, n]) => h("span", { class: `pill ${STATUS_PILL[k] || ""}` }, `${STATUS_LABEL[k]} ${n}`)),
         h("span", { class: "spacer" }),
         S.queue.some((i) => BULK_RETRY.includes(i.status)) && h("button", { class: "btn ghost small", disabled: runningElsewhere(), onclick: () => tryAgain(S.queue.filter((i) => BULK_RETRY.includes(i.status))) }, "Try all again"),
-        !S.autopilotRunning && h("button", { class: "btn ghost small", onclick: () => ((S.queue = S.queue.filter((i) => !["applied", "manual", "failed", "ineligible"].includes(i.status))), saveQueue(), renderJobs()) }, "Clear finished")
+        !S.autopilotRunning && h("button", { class: "btn ghost small", onclick: () => ((S.queue = S.queue.filter((i) => !["applied", "manual", "failed", "ineligible", "notfit"].includes(i.status))), saveQueue(), renderJobs()) }, "Clear finished")
       )
     );
-    const order = { running: 0, review: 1, "needs-you": 2, queued: 3, failed: 4, manual: 5, ineligible: 6, applied: 7 };
+    const order = { running: 0, review: 1, "needs-you": 2, queued: 3, failed: 4, manual: 5, ineligible: 6, notfit: 7, applied: 8 };
     for (const it of [...S.queue].sort((a, b) => order[a.status] - order[b.status])) card.append(queueRow(it));
   }
   return card;
 }
 
 // Every finished job except submitted ones (retrying those would apply twice).
-const RETRYABLE = ["failed", "needs-you", "ineligible", "manual", "review"];
+const RETRYABLE = ["failed", "needs-you", "ineligible", "manual", "review", "notfit"];
 // "Try all again" leaves filled tabs that are waiting for your review alone.
 const BULK_RETRY = ["failed", "needs-you", "ineligible", "manual"];
 const runningElsewhere = () => !S.autopilotRunning && S.queue.some((i) => i.status === "running");
@@ -1151,7 +1183,8 @@ async function tryAgain(items) {
   for (const it of items) {
     if (it.tabId) chrome.tabs.remove(it.tabId).catch(() => {});
     // "Apply manually" sites get attempted this time instead of skipped.
-    Object.assign(it, { status: "queued", note: "", tabId: null, finishedAt: null, force: it.force || it.status === "manual" });
+    // "Apply manually" sites get attempted this time; "Not a fit" means you disagreed.
+    Object.assign(it, { status: "queued", note: "", tabId: null, finishedAt: null, force: it.force || it.status === "manual" || it.status === "notfit" });
     // Move to the end so a run already in progress here picks it up.
     S.queue = S.queue.filter((x) => x !== it);
     S.queue.push(it);
@@ -1201,7 +1234,7 @@ function queueRow(it) {
       h("span", { class: `pill ${STATUS_PILL[it.status] || ""}` }, it.status === "running" ? [spinner(), " "] : null, STATUS_LABEL[it.status])
     ),
     it.note ? h("div", { class: "small muted", style: { marginTop: "2px" } }, it.note, it.status === "running" && it.stepAt ? h("span", { class: "elapsed", "data-at": it.stepAt }, ` · ${timeOnStep(it.stepAt)}`) : null) : null,
-    ["review", "needs-you", "manual", "failed", "ineligible"].includes(it.status)
+    ["review", "needs-you", "manual", "failed", "ineligible", "notfit"].includes(it.status)
       ? h(
           "div",
           { class: "row", style: { marginTop: "4px" } },
@@ -1313,6 +1346,9 @@ async function startAutopilot(n) {
       return { name: /Cover_Letter/.test(name) ? name : name.replace(/\.pdf$/, "_Cover_Letter.pdf"), base64: pdf.base64 };
     },
     coverOnlyIfRequired: S.settings.coverAttach === "required",
+    // Is it a fit? The posting's own degree requirements (title/listing were
+    // already used to pick it).
+    fit: (job, postingText) => Fit.fitFromPosting(postingText, S.settings.target),
     // Can you apply? Listing flags + Simplify data + the posting itself.
     eligibility: async (job, postingText) => {
       const listing = S.jobsByKey.get(job.key);
@@ -1418,6 +1454,7 @@ async function parseUploaded() {
         await store.set("profile", S.profile);
       }
       toast("Resume parsed. Check the boxes below.");
+      buildTargetFromResume({ quiet: true }).catch(() => {});
     },
     renderResumeTab
   );
@@ -2490,7 +2527,57 @@ function renderSettings() {
     textarea({ rows: 3, value: st.instructions || "", placeholder: "e.g. For internship vs co-op questions, pick the summer internship.", oninput: (e) => ((st.instructions = e.target.value), saveSettings()) })
   );
 
-  el.replaceChildren(aiCard, profileCard, answersCard, bankCard(), instructionsCard, autopilotCard, sourceCard, filesCard, updatesCard, dataCard);
+  const tg = st.target;
+  const list = (key) =>
+    textarea({
+      rows: 2,
+      value: (tg[key] || []).join(", "),
+      oninput: debounce((e) => {
+        tg[key] = e.target.value.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+        saveSettings();
+      }, 300),
+    });
+  const targetCard = h(
+    "div",
+    { class: "card" },
+    h("h3", {}, "What jobs to look for"),
+    h("p", { class: "small muted" }, tg.summary || "Claude reads your resume and decides which roles fit: the fields, the degree level, and what to rule out. Every listing is then scored against this without AI."),
+    h(
+      "div",
+      { class: "chips", style: { margin: "6px 0" } },
+      Fit.CATEGORIES.map((c) =>
+        h(
+          "button",
+          {
+            class: `pill${tg.categories.includes(c) ? " good" : ""}`,
+            style: { cursor: "pointer" },
+            onclick: () => {
+              tg.categories = tg.categories.includes(c) ? tg.categories.filter((x) => x !== c) : [...tg.categories, c];
+              saveSettings();
+              renderSettings();
+            },
+          },
+          c
+        )
+      )
+    ),
+    h("label", { class: "field" }, h("span", {}, "Good fit if the title mentions"), list("include")),
+    h("label", { class: "field" }, h("span", {}, "Not a fit if the title mentions"), list("exclude")),
+    h(
+      "label",
+      { class: "field" },
+      h("span", {}, "Degree you're pursuing (roles only for other degrees are hidden)"),
+      h("select", { onchange: (e) => ((tg.degree = e.target.value), saveSettings()) }, ["Bachelor's", "Master's", "PhD"].map((d) => h("option", { value: d, selected: tg.degree === d }, d)))
+    ),
+    h("div", { class: "small muted", style: { marginBottom: "6px" } }, "Terms that have already started (e.g. a Fall 2026 co-op in October 2026) are hidden too."),
+    h(
+      "button",
+      { class: "btn", disabled: !aiReady() || !hasContent(S.base), onclick: () => withBusy("target", () => buildTargetFromResume(), renderSettings) },
+      S.busy.target ? [spinner(), " Reading your resume…"] : tg.builtAt ? "Re-read my resume" : "Read my resume"
+    )
+  );
+
+  el.replaceChildren(aiCard, profileCard, targetCard, answersCard, bankCard(), instructionsCard, autopilotCard, sourceCard, filesCard, updatesCard, dataCard);
 }
 
 function hr() {
@@ -2598,6 +2685,9 @@ async function init() {
     renderUpdateBanner(last);
     if (Update.isStale(last)) Update.checkForUpdate(settings).then(renderUpdateBanner).catch(() => {});
   }
+
+  // No job target yet but a resume is there: read it once in the background.
+  if (!settings.target?.builtAt && hasContent(base) && aiReady()) buildTargetFromResume({ quiet: true }).catch(() => {});
 
   // Autopilot running in a pinned tab: start it here once jobs are loaded.
   if (RUN_PARAM) {

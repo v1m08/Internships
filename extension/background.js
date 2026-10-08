@@ -23,7 +23,7 @@ async function refreshAndNotify() {
   const eligSignals = Object.fromEntries(Object.entries(await get("eligCache", {})).map(([id, e]) => [id, e.signals]));
   const seen = new Set(await get("seenJobs", []));
   const firstRun = seen.size === 0;
-  const fresh = cache.items.filter((j) => !seen.has(j.id) && !applied[jobKeyForUrl(j.url)] && matchesFilters(j, settings.filters, profile, eligSignals));
+  const fresh = cache.items.filter((j) => !seen.has(j.id) && !applied[jobKeyForUrl(j.url)] && matchesFilters(j, settings.filters, profile, eligSignals, settings.target));
   await set("seenJobs", cache.items.map((j) => j.id).slice(0, 20000));
   if (!firstRun && fresh.length && settings.autopilot.notify) {
     chrome.notifications.create("new-jobs", {
