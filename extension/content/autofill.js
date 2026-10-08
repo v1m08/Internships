@@ -38,7 +38,10 @@
     if (!el) return "";
     const clone = el.cloneNode(true);
     clone.querySelectorAll("input, select, textarea, option, script, style, svg").forEach((n) => n.remove());
-    return clean(clone.textContent);
+    // Keep a single " *" marker so required-ness survives cleaning.
+    const raw = clone.textContent || "";
+    const text = clean(raw);
+    return text && /[*✱]|\(required\)/i.test(raw) ? `${text} *` : text;
   }
 
   function distinctControls(root) {
@@ -84,10 +87,15 @@
       if (lg && textOf(lg)) return textOf(lg);
     }
     const isGroup = el.type === "radio" || el.type === "checkbox";
+    // A lone checkbox ("I agree to…") is labeled by its own text.
+    if (el.type === "checkbox" && (!el.name || document.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`).length === 1)) {
+      const own = optionLabel(el);
+      if (own) return own;
+    }
     for (let p = el.parentElement, depth = 0; p && depth < 6; p = p.parentElement, depth++) {
       if (p === document.body) break;
-      const n = distinctControls(p);
-      if (n > 1 && !isGroup) break;
+      // Stop once the container holds other fields: its labels belong to them.
+      if (distinctControls(p) > 1) break;
       const candidates = p.querySelectorAll(
         'label, legend, [class*="label" i], [class*="question" i], [class*="title" i], [data-automation-id*="label" i]'
       );
@@ -98,7 +106,6 @@
         const t = textOf(c);
         if (t && t.length < 400) return t;
       }
-      if (n > 1 && isGroup) break;
     }
     const aria = el.getAttribute("aria-label");
     if (aria) return clean(aria);
@@ -135,7 +142,7 @@
     return (
       el.required ||
       el.getAttribute("aria-required") === "true" ||
-      /\*/.test(label || "") ||
+      /[*✱]/.test(label || "") ||
       !!el.closest('[class*="required" i]')
     );
   }
@@ -518,6 +525,8 @@
   // Unfilled controls that look like real application questions (not
   // profile fields), for the AI to draft answers to.
   function collectQuestions() {
+    // Ids restart at 0 each call, so drop old ones to avoid duplicates.
+    document.querySelectorAll(`[${QID_ATTR}]`).forEach((n) => n.removeAttribute(QID_ATTR));
     const out = [];
     const doneGroups = new Set();
     let n = 0;
@@ -555,7 +564,8 @@
           kind = "short_text";
         }
       }
-      const qid = `${location.host}-${n++}-${Math.random().toString(36).slice(2, 7)}`;
+      // Stable ids (same page → same ids) so cached AI answers can be reused.
+      const qid = `${location.host}${location.pathname}#${n++}`;
       el.setAttribute(QID_ATTR, qid);
       out.push({ qid, question: label.slice(0, 500), kind, options: options || [], required });
     }
@@ -589,5 +599,150 @@
     return count;
   }
 
-  window.__jobpilot = { fill, collectQuestions, fillAnswers, clearMarks, _labelFor: labelFor, _classify: classify };
+  // ------------------------------------------------------- autopilot helpers
+
+  const clickableText = (el) => clean(el.innerText || el.value || el.getAttribute("aria-label") || "");
+
+  function visibleEl(el) {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return false;
+    const cs = getComputedStyle(el);
+    return cs.visibility !== "hidden" && cs.display !== "none";
+  }
+
+  // How much of an application form is on this page.
+  function formStats() {
+    const all = controls().filter((el) => !["search", "hidden"].includes(el.type) && !el.closest('[role="search"], header, nav'));
+    return {
+      controls: all.length,
+      fileInputs: all.filter((el) => el.type === "file").length,
+      host: location.host,
+      url: location.href,
+    };
+  }
+
+  // Click the posting's "Apply" button to reveal or navigate to the form.
+  function clickApply() {
+    const re = /^(apply|apply now|apply for this (job|position|role)|apply to this (job|position)|apply here|start application|i'?m interested)$/i;
+    const bad = /linkedin|indeed|google|glassdoor|with resume|saved/i;
+    const cands = [...document.querySelectorAll('a, button, [role="button"], input[type="button"]')].filter((el) => visibleEl(el) && re.test(clickableText(el)) && !bad.test(clickableText(el)));
+    const el = cands[0];
+    if (!el) return { clicked: false };
+    const href = el.tagName === "A" ? el.href : null;
+    el.click();
+    return { clicked: true, text: clickableText(el), href };
+  }
+
+  // Required fields that are still empty after filling.
+  function missingRequired() {
+    const out = [];
+    const doneGroups = new Set();
+    for (const el of controls()) {
+      const isGroup = el.type === "radio" || el.type === "checkbox";
+      if (isGroup) {
+        const gk = `${el.type}:${el.name}`;
+        if (doneGroups.has(gk)) continue;
+        doneGroups.add(gk);
+      }
+      const label = labelFor(el);
+      if (!isRequired(el, label)) continue;
+      let empty;
+      if (el.type === "file") empty = !el.files || el.files.length === 0;
+      else if (isGroup) empty = !radioGroup(el).some((g) => g.checked);
+      else empty = isEmpty(el);
+      if (empty) out.push((label || el.name || el.id || "Unlabeled field").slice(0, 80));
+    }
+    return out;
+  }
+
+  function detectCaptcha() {
+    const frames = [...document.querySelectorAll("iframe")].filter((f) => /recaptcha\/api2\/anchor|hcaptcha\.com|challenges\.cloudflare\.com/i.test(f.src) && visibleEl(f));
+    return frames.length > 0;
+  }
+
+  // Company and role from the page, without AI.
+  function jobMeta() {
+    const title = clean(document.title);
+    const og = (p) => clean(document.querySelector(`meta[property="og:${p}"]`)?.content || "");
+    const h1 = clean(document.querySelector("h1")?.innerText || "");
+    const pathCompany = () => {
+      const m = location.pathname.split("/").filter(Boolean);
+      if (/greenhouse\.io|lever\.co|ashbyhq\.com|workable\.com|smartrecruiters\.com/.test(location.host) && m[0]) return m[0].replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      return "";
+    };
+    let m = title.match(/^Job Application for (.+?) at (.+)$/i);
+    if (m) return { role: m[1], company: m[2] };
+    m = title.match(/^(.+?) @ (.+)$/);
+    if (m) return { role: m[1], company: m[2] };
+    if (/lever\.co/.test(location.host) && (m = title.match(/^(.+?) - (.+)$/))) return { company: m[1], role: m[2] };
+    m = title.match(/^(.+?) (?:-|–|\|) (.+?)(?: (?:-|–|\|) .*)?$/);
+    const company = og("site_name") || pathCompany() || (m ? m[2] : "");
+    return { company, role: h1 || (m ? m[1] : title) };
+  }
+
+  // Required "I certify / I agree" checkboxes (used only by Autopilot,
+  // which you've allowed to submit on your behalf).
+  function checkAttestations() {
+    let n = 0;
+    for (const el of controls()) {
+      if (el.type !== "checkbox" || el.checked) continue;
+      const group = radioGroup(el);
+      if (group.length !== 1) continue;
+      const label = norm(optionLabel(el) + " " + labelFor(el));
+      if (!isRequired(el, label) && !/\*/.test(optionLabel(el))) continue;
+      if (/certify|acknowledge|agree|understand|consent|accurate|attest|confirm|privacy/.test(label) && !/sms|text message|marketing|newsletter/.test(label)) {
+        el.click();
+        if (!el.checked) {
+          el.checked = true;
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        mark(el, "filled", "attestation checked by Autopilot");
+        n++;
+      }
+    }
+    return n;
+  }
+
+  function submit() {
+    const re = /^(submit|submit application|submit my application|send application|apply|apply now|finish|complete application)$/i;
+    const forms = [...document.querySelectorAll("form")].filter((f) => f.querySelector("input, textarea, select"));
+    for (const root of forms.length ? forms : [document]) {
+      const btns = [...root.querySelectorAll('button, input[type="submit"], [role="button"]')].filter((b) => visibleEl(b) && !b.disabled);
+      const btn = btns.find((b) => b.type === "submit" && re.test(clickableText(b))) || btns.find((b) => re.test(clickableText(b))) || btns.find((b) => b.type === "submit");
+      if (btn) {
+        btn.click();
+        return { clicked: true, text: clickableText(btn) };
+      }
+    }
+    return { clicked: false };
+  }
+
+  // After submitting: did the site confirm, or show errors?
+  function submissionState() {
+    const text = (document.body.innerText || "").slice(0, 20000);
+    const confirmed =
+      /thank(s| you) for (applying|your (application|interest|submission))|application (has been |was )?(submitted|received)|we('ve| have) received your application|successfully (submitted|applied)|your application is (complete|in)/i.test(text) ||
+      /confirmation|thank-?you|submitted|success/i.test(location.pathname);
+    const errors = [...document.querySelectorAll('[aria-invalid="true"], .error, .field-error, [class*="error" i]')]
+      .filter((e) => visibleEl(e) && clean(e.innerText).length > 0 && clean(e.innerText).length < 200)
+      .map((e) => clean(e.innerText));
+    return { confirmed, errors: [...new Set(errors)].slice(0, 5) };
+  }
+
+  window.__jobpilot = {
+    fill,
+    collectQuestions,
+    fillAnswers,
+    clearMarks,
+    formStats,
+    clickApply,
+    missingRequired,
+    detectCaptcha,
+    jobMeta,
+    checkAttestations,
+    submit,
+    submissionState,
+    _labelFor: labelFor,
+    _classify: classify,
+  };
 })();

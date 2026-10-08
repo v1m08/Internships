@@ -1,10 +1,10 @@
-// Claude calls: resume parsing, per-job tailoring, drafting answers.
+// Claude calls: resume parsing (once) and per-job bullet rewrites + answers.
 import { Anthropic } from "../vendor/anthropic.js";
 
 export const MODELS = [
-  { id: "claude-opus-5-5", label: "Claude Opus 5.5 (best quality)" },
-  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5 (faster, cheaper)" },
+  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5 (fast, recommended)" },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 (fastest, cheapest)" },
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5 (best writing, slower)" },
 ];
 
 // Models that accept the server-side refusal fallback.
@@ -40,10 +40,10 @@ function friendly(err) {
 export const BRIDGE_HOST = "com.jobpilot.claude_bridge";
 
 export const CC_MODELS = [
-  { id: "default", label: "Your Claude Code default" },
-  { id: "opus", label: "Opus (best quality, uses limits faster)" },
-  { id: "sonnet", label: "Sonnet (good balance)" },
+  { id: "sonnet", label: "Sonnet (fast, recommended)" },
   { id: "haiku", label: "Haiku (fastest)" },
+  { id: "opus", label: "Opus (best writing, slower, uses limits faster)" },
+  { id: "default", label: "Your Claude Code default" },
 ];
 
 export function bridge(msg) {
@@ -76,7 +76,7 @@ async function callViaClaudeCode(settings, { system, content, schema, effort }) 
     if (part.type === "document") pdfBase64 = part.source.data;
     if (part.type === "text") prompt += part.text;
   }
-  const resp = await bridge({ type: "run", system, prompt, schema, model: settings.ccModel || "default", effort, pdfBase64 });
+  const resp = await bridge({ type: "run", system, prompt, schema, model: settings.ccModel || "sonnet", effort, pdfBase64 });
   return resp.data;
 }
 
@@ -84,7 +84,41 @@ export async function pingBridge() {
   return bridge({ type: "ping" });
 }
 
-async function callJSON(settings, { system, content, schema, effort = "medium", maxTokens = 16000 }) {
+// ------------------------------------------------------------- caching
+// Same model + prompt + schema → same stored answer, so repeated work is
+// instant and results stay consistent (current models don't accept a
+// temperature setting, so caching is how we make them deterministic).
+
+async function sha256(text) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const CACHE_KEY = "aiCache";
+const CACHE_MAX = 300;
+
+async function cached(key, fn) {
+  const store = (await chrome.storage.local.get(CACHE_KEY))[CACHE_KEY] || {};
+  if (store[key]) return store[key].v;
+  const v = await fn();
+  const fresh = (await chrome.storage.local.get(CACHE_KEY))[CACHE_KEY] || {};
+  fresh[key] = { v, t: Date.now() };
+  const keys = Object.keys(fresh);
+  if (keys.length > CACHE_MAX) keys.sort((a, b) => fresh[a].t - fresh[b].t).slice(0, keys.length - CACHE_MAX).forEach((k) => delete fresh[k]);
+  await chrome.storage.local.set({ [CACHE_KEY]: fresh });
+  return v;
+}
+
+function modelFor(settings) {
+  return settings.provider === "claude-code" ? `cc:${settings.ccModel || "sonnet"}` : `api:${settings.model}`;
+}
+
+async function callJSON(settings, opts) {
+  const key = await sha256(JSON.stringify([modelFor(settings), opts.system, opts.content, opts.schema, opts.effort]));
+  return cached(key, () => callJSONUncached(settings, opts));
+}
+
+async function callJSONUncached(settings, { system, content, schema, effort = "low", maxTokens = 16000 }) {
   if (settings.provider === "claude-code") return callViaClaudeCode(settings, { system, content, schema, effort });
   const client = makeClient(settings);
   const params = {
@@ -191,59 +225,34 @@ export async function parseResume(settings, pdfBase64) {
   });
 }
 
-// ----------------------------------------------------------------- tailor
+// ------------------------------------------- bullet rewrites + answers
+// The only per-job AI step. Keywords, skills order, project order, page fit
+// and standard questions are handled deterministically (keywords.js,
+// answers.js); this call only rewords bullets and answers what's left, in
+// one request to save Claude Code's per-call startup time.
 
-const TAILOR_SCHEMA = obj({
-  company: str,
-  role: str,
-  keywords: arr(str),
-  missing_keywords: arr(str),
-  bullet_edits: arr(obj({ id: str, text: str, reason: str })),
-  line_edits: arr(obj({ id: str, text: str, reason: str })),
-  hide_bullet_ids: arr(str),
-  entry_orders: arr(obj({ section_id: str, entry_ids: arr(str), reason: str })),
-  summary: str,
-  summary_reason: str,
+const JOB_SCHEMA = obj({
+  bullet_edits: arr(obj({ id: str, text: str })),
+  answers: arr(obj({ qid: str, answer: str })),
 });
 
-const TAILOR_SYSTEM = `You tailor a student's resume to one job posting so it passes keyword screens and reads as relevant to a recruiter. You are editing a one-page resume.
+const JOB_SYSTEM = `You help a student apply to one internship. Two tasks; either list may be empty.
 
-Hard rules (never break these):
-- Only rephrase, reorder or hide what is already in the resume. Never invent experience, employers, titles, dates, metrics, numbers, technologies, certifications or skills that aren't stated or clearly implied by the existing text.
-- Keep every number and fact in a bullet intact. A rewritten bullet must describe the same work.
-- Never change dates, titles, employers or schools.
-- Keep bullets concise: about the same length as the original (one line, ~110 characters max where possible), starting with a strong past-tense verb (present tense for current roles).
+1. bullet_edits: reword resume bullets so they use the posting's terminology where the SAME work truthfully fits. Only bullets that clearly improve; at most 6. Keep every number and fact; never add tools, skills, metrics or claims that aren't in the bullet or elsewhere in the resume; keep length similar (≤ ~110 characters); start with a strong past-tense verb. Use the given ids.
 
-What to do:
-- Extract the posting's most important keywords (skills, tools, domains, responsibilities).
-- Rewrite bullets where the same truthful content can use the posting's terminology or put the relevant part first. Leave bullets that are already fine unchanged (don't include them).
-- In "lines" sections (e.g. Skills), reorder items so the posting's matching skills come first; you may drop clearly irrelevant items from a line but never add skills that don't appear anywhere in the resume.
-- Optionally reorder entries within a section (e.g. put the most relevant project first). Don't reorder Education or work experience out of reverse-chronological order.
-- Hide at most a few clearly irrelevant bullets if it helps the resume fit and focus.
-- If the resume has a summary, you may rewrite it for this role; if it has none, return "".
-- missing_keywords: important posting keywords the resume has no truthful evidence for (so the student can decide whether to add them honestly).
-- company and role: from the posting, e.g. "Stripe" and "Software Engineering Intern".
-Use the exact ids from the resume JSON. Give each edit a short reason (under 12 words).`;
+2. answers: answer each listed application question as the student, first person, using only facts from the resume and profile. short_text: a few words to one sentence. long_text: 80–150 words unless the question sets a length; connect the student's real experience to this company and role. single_choice / dropdown / multi_choice: reply with exactly one of the given options' text; for preference questions (team, location, interest area, shift) pick the option that best fits the resume and posting. Answer "" only for factual questions the resume and profile don't cover (e.g. a referrer's name, a specific date, an ID number).`;
 
-export async function tailorResume(settings, resumeForAI, job) {
-  const text = `<job_posting url="${job.url || ""}">\n${job.text}\n</job_posting>\n\n<resume_json>\n${JSON.stringify(resumeForAI)}\n</resume_json>\n\nTailor the resume to this job posting.`;
-  return callJSON(settings, { system: TAILOR_SYSTEM, content: text, schema: TAILOR_SCHEMA, effort: "medium" });
-}
-
-// ----------------------------------------------------------------- answers
-
-const ANSWER_SCHEMA = obj({ answers: arr(obj({ qid: str, answer: str })) });
-
-const ANSWER_SYSTEM = `You draft answers to job application questions for a student applying to an internship. The student will review every answer before submitting.
-
-- Write in the first person as the student, sincere and specific, drawing only on facts in their resume and profile. Never invent experience.
-- Short text: a direct answer (a few words to one sentence). Long text: 80–150 words unless the question asks for a different length; tie the student's real experience to this company and role.
-- single_choice / dropdown / multi_choice: answer with exactly one of the given options' text (for multi_choice, the single best option). Use the profile for eligibility/demographic questions; if unknown, choose the option that declines to answer if there is one.
-- If a question can't be answered truthfully from the information given (e.g. asks for a referral name, salary expectations, or a fact you don't know), return an empty string for it.
-Return one answer per question, using its qid.`;
-
-export async function draftAnswers(settings, { questions, resumeText, profile, job }) {
-  const text = `<job_posting>\n${(job?.text || "").slice(0, 30000)}\n</job_posting>\n\n<resume>\n${resumeText}\n</resume>\n\n<profile>\n${JSON.stringify(profile)}\n</profile>\n\n<questions>\n${JSON.stringify(questions)}\n</questions>`;
-  const r = await callJSON(settings, { system: ANSWER_SYSTEM, content: text, schema: ANSWER_SCHEMA, effort: "medium" });
-  return r.answers || [];
+// bullets: [{ id, text }]; questions: [{ qid, question, kind, options }]
+export async function rewriteAndAnswer(settings, { bullets, keywords, posting, questions, resumeText, profile, company, role }) {
+  if (!bullets.length && !questions.length) return { bullet_edits: [], answers: [] };
+  const content = [
+    `<job company="${company || ""}" role="${role || ""}">\n${posting}\n</job>`,
+    keywords.length ? `<posting_keywords_the_resume_already_has>${keywords.join(", ")}</posting_keywords_the_resume_already_has>` : "",
+    bullets.length ? `<bullets>\n${JSON.stringify(bullets)}\n</bullets>` : "",
+    questions.length ? `<resume>\n${resumeText}\n</resume>\n<profile>${JSON.stringify(profile)}</profile>\n<questions>\n${JSON.stringify(questions.map(({ qid, question, kind, options }) => ({ qid, question, kind, options })))}\n</questions>` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const effort = questions.some((q) => q.kind === "long_text") ? "medium" : "low";
+  return callJSON(settings, { system: JOB_SYSTEM, content, schema: JOB_SCHEMA, effort });
 }

@@ -81,28 +81,6 @@ export function mergeProfile(profile, suggested) {
   return out;
 }
 
-// Compact view sent to the AI for tailoring: ids + text only.
-export function forAI(r) {
-  return {
-    summary: r.summary,
-    sections: r.sections.map((s) => ({
-      id: s.id,
-      title: s.title,
-      kind: s.kind,
-      entries: s.entries.map((e) => ({
-        id: e.id,
-        title: e.title,
-        subtitle: e.subtitle,
-        dates: e.dates,
-        hidden: e.hidden,
-        bullets: e.bullets.map((b) => ({ id: b.id, text: b.text, hidden: b.hidden })),
-      })),
-      lines: s.lines.map((l) => ({ id: l.id, label: l.label, text: l.text })),
-      text: s.text,
-    })),
-  };
-}
-
 function index(r) {
   const bullets = new Map();
   const lines = new Map();
@@ -113,42 +91,6 @@ function index(r) {
     for (const l of s.lines) lines.set(l.id, { l, s });
   }
   return { bullets, lines, sections };
-}
-
-// Convert the AI's tailoring output into a reviewable list of changes,
-// dropping anything that references ids that don't exist.
-export function changesFromTailoring(r, t) {
-  const { bullets, lines, sections } = index(r);
-  const changes = [];
-  for (const ed of t.bullet_edits || []) {
-    const hit = bullets.get(ed.id);
-    if (!hit || !ed.text || ed.text.trim() === hit.b.text.trim()) continue;
-    changes.push({ id: uid("c"), type: "bullet", target: ed.id, where: hit.e.title || hit.s.title, before: hit.b.text, after: ed.text.trim(), reason: ed.reason, accepted: true });
-  }
-  for (const ed of t.line_edits || []) {
-    const hit = lines.get(ed.id);
-    if (!hit || !ed.text || ed.text.trim() === hit.l.text.trim()) continue;
-    changes.push({ id: uid("c"), type: "line", target: ed.id, where: hit.l.label || hit.s.title, before: hit.l.text, after: ed.text.trim(), reason: ed.reason, accepted: true });
-  }
-  for (const id of t.hide_bullet_ids || []) {
-    const hit = bullets.get(id);
-    if (!hit || hit.b.hidden) continue;
-    changes.push({ id: uid("c"), type: "hide", target: id, where: hit.e.title || hit.s.title, before: hit.b.text, after: "(hidden for this job)", reason: "Less relevant to this role", accepted: true });
-  }
-  for (const o of t.entry_orders || []) {
-    const s = sections.get(o.section_id);
-    if (!s || s.kind !== "entries") continue;
-    const current = s.entries.map((e) => e.id);
-    const proposed = o.entry_ids.filter((id) => current.includes(id));
-    for (const id of current) if (!proposed.includes(id)) proposed.push(id);
-    if (proposed.join() === current.join()) continue;
-    const name = (id) => s.entries.find((e) => e.id === id).title || "(untitled)";
-    changes.push({ id: uid("c"), type: "order", target: s.id, order: proposed, where: s.title, before: current.map(name).join(" → "), after: proposed.map(name).join(" → "), reason: o.reason, accepted: true });
-  }
-  if (t.summary && t.summary.trim() && t.summary.trim() !== (r.summary || "").trim() && (r.summary || "").trim()) {
-    changes.push({ id: uid("c"), type: "summary", target: "summary", where: "Summary", before: r.summary, after: t.summary.trim(), reason: t.summary_reason, accepted: true });
-  }
-  return changes;
 }
 
 export function applyChanges(base, changes) {

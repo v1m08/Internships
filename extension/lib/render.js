@@ -3,7 +3,7 @@
 // otherwise the built-in Computer Modern renderer (pdf.js), which
 // reproduces the same layout.
 import { resumeToLatex } from "./latex.js";
-import { resumeToBase64, renderResume } from "./pdf.js";
+import { resumeToBase64, renderResume, loadFonts } from "./pdf.js";
 import { bridge } from "./ai.js";
 
 const cache = new Map(); // tex -> { base64, engine }
@@ -27,6 +27,18 @@ async function viaLatex(resume) {
   return out;
 }
 
+const builtCache = new Map(); // resume JSON -> base64
+
+async function builtIn(resume) {
+  await loadFonts();
+  const key = JSON.stringify(resume);
+  if (!builtCache.has(key)) {
+    builtCache.set(key, resumeToBase64(resume).base64);
+    if (builtCache.size > 30) builtCache.delete(builtCache.keys().next().value);
+  }
+  return builtCache.get(key);
+}
+
 // Returns { base64, engine: "pdflatex" | "tectonic" | … | "built-in", note? }
 export async function buildResumePdf(resume, settings) {
   const wantLatex = settings.renderer !== "built-in" && settings.provider === "claude-code";
@@ -37,11 +49,10 @@ export async function buildResumePdf(resume, settings) {
       // No TeX installed / old bridge: remember and fall back. A compile
       // error falls back for this resume only.
       if (e.code === "NO_TEX" || /Unknown request type|isn't installed/i.test(e.message)) latexUnavailable = e.message;
-      const built = resumeToBase64(resume);
-      return { base64: built.base64, engine: "built-in", note: e.message };
+      return { base64: await builtIn(resume), engine: "built-in", note: e.message };
     }
   }
-  return { base64: resumeToBase64(resume).base64, engine: "built-in" };
+  return { base64: await builtIn(resume), engine: "built-in" };
 }
 
 export function pageCount(resume) {

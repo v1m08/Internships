@@ -276,7 +276,9 @@ async function handle(msg) {
       "-p",
       "--output-format", "json",
       "--no-session-persistence",
-      "--strict-mcp-config",
+      "--strict-mcp-config", // skip loading your MCP servers
+      "--disable-slash-commands", // skip loading skills
+      "--setting-sources", "user", // skip project/local settings in the temp dir
       "--tools", msg.pdfBase64 ? "Read" : "",
       "--system-prompt", msg.system || "",
     ];

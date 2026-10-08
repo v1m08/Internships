@@ -1,25 +1,11 @@
-// Job listings from a SimplifyJobs-format listings.json, cached locally.
+// Job listings merged from all enabled GitHub sources, cached locally.
 import { get, set } from "./store.js";
+import { fetchAll } from "./sources.js";
 
-export async function refreshJobs(url) {
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`Couldn't load job list (HTTP ${res.status}). Check the source URL in Settings.`);
-  const data = await res.json();
-  if (!Array.isArray(data)) throw new Error("Job source isn't a listings.json array.");
-  const items = data
-    .filter((j) => j.active !== false && j.is_visible !== false && j.url)
-    .map((j) => ({
-      id: j.id || j.url,
-      company: j.company_name || "",
-      title: j.title || "",
-      url: j.url,
-      locations: j.locations || [],
-      category: j.category || "",
-      sponsorship: j.sponsorship || "",
-      posted: j.date_posted || j.date_updated || 0,
-    }))
-    .sort((a, b) => b.posted - a.posted);
-  const cache = { fetchedAt: Date.now(), items };
+export async function refreshJobs(sources) {
+  const { items, errors } = await fetchAll(sources);
+  if (!items.length && errors.length) throw new Error(`Couldn't load jobs: ${errors.join("; ")}`);
+  const cache = { fetchedAt: Date.now(), items, errors };
   await set("jobsCache", cache);
   return cache;
 }

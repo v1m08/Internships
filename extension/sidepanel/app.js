@@ -7,6 +7,11 @@ import { resumeToLatex } from "../lib/latex.js";
 import * as Jobs from "../lib/jobs.js";
 import * as Page from "../lib/page.js";
 import * as Update from "../lib/update.js";
+import * as Sources from "../lib/sources.js";
+import * as Autopilot from "../lib/autopilot.js";
+import * as Ans from "../lib/answers.js";
+import * as K from "../lib/keywords.js";
+import { prepareJob, tailoredEntry } from "../lib/tailor.js";
 
 // ------------------------------------------------------------------ state
 
@@ -31,6 +36,9 @@ const S = {
   hideApplied: true,
   jobsShown: 50,
   activeTab: "apply",
+  queue: [], // autopilot items
+  autopilotRunning: false,
+  jobsByKey: new Map(),
 };
 
 // ---------------------------------------------------------------- helpers
@@ -158,7 +166,7 @@ async function refreshContext() {
   let job = tab ? await store.getTabJob(tab.id) : null;
   if (!job && tab?.url && /^https?:/.test(tab.url)) {
     const key = Jobs.jobKeyForUrl(tab.url);
-    const hit = S.jobsCache.items.find((j) => Jobs.jobKeyForUrl(j.url) === key);
+    const hit = S.jobsByKey.get(key);
     job = hit ? jobFromListing(hit) : { key, company: "", title: "", url: tab.url, adhoc: true };
   }
   if (!job || !tab || !/^https?:/.test(tab.url || "")) job = null;
@@ -401,14 +409,13 @@ async function startTailor() {
   await withBusy("tailor", async () => {
     const posting = await Page.readJobPosting(S.tab);
     S.posting[S.job.key] = posting;
-    const out = await AI.tailorResume(S.settings, R.forAI(S.base), posting);
-    S.pending = {
-      company: out.company || S.job.company || "",
-      role: out.role || S.job.title || "",
-      keywords: out.keywords || [],
-      missing: out.missing_keywords || [],
-      changes: R.changesFromTailoring(S.base, out),
-    };
+    let job = { company: S.job.company, title: S.job.title };
+    if (!job.company || !job.title) {
+      const meta = (await Page.callAll(S.tab, "jobMeta")).find((m) => m.company || m.role) || {};
+      job = { company: job.company || meta.company || "", title: job.title || meta.role || "" };
+    }
+    const prep = await prepareJob({ settings: S.settings, base: S.base, posting, job, profile: S.profile, useAI: aiReady() });
+    S.pending = { company: prep.company, role: prep.role, keywords: prep.keywords, missing: prep.missing, changes: prep.changes };
   });
 }
 
@@ -478,7 +485,7 @@ function questionsCard(hasKey) {
         h(
           "div",
           { class: "change" },
-          h("div", { class: "where" }, a.question),
+          h("div", { class: "where" }, a.question, " ", h("span", { class: "pill" }, { rule: "profile", saved: "saved", ai: "AI draft", none: "needs you" }[a.source] || "")),
           h("div", { class: "after" }, a.answer || h("span", { class: "muted" }, "(left for you: not enough info to answer truthfully)")),
           a.answer &&
             h(
@@ -494,7 +501,23 @@ function questionsCard(hasKey) {
                   },
                 },
                 "Copy"
-              )
+              ),
+              a.source === "ai" &&
+                !Ans.isCompanySpecific(a.question, jobLabel().company) &&
+                h(
+                  "button",
+                  {
+                    class: "btn ghost small",
+                    title: "Reuse this answer (no AI) when another application asks the same question",
+                    onclick: async (e) => {
+                      const saved = await store.get("savedAnswers", {});
+                      saved[Ans.savedKey(a.question)] = a.answer;
+                      await store.set("savedAnswers", saved);
+                      e.target.textContent = "Saved ✓";
+                    },
+                  },
+                  "Save for next time"
+                )
             )
         )
       );
@@ -511,25 +534,39 @@ async function doDraftAnswers() {
       toast("No unanswered questions found on this page.");
       return;
     }
-    let posting = S.posting[S.job.key];
-    if (!posting) {
-      try {
-        posting = await Page.readJobPosting(S.tab);
-      } catch {
-        posting = { text: "" };
-      }
+    const saved = await store.get("savedAnswers", {});
+    const results = [];
+    const pending = [];
+    for (const q of questions) {
+      const det = Ans.answerDeterministically(q, S.profile, saved);
+      if (det) results.push({ ...q, answer: det.answer, source: det.source });
+      else pending.push(q);
     }
-    const t = currentTailored();
-    const answers = await AI.draftAnswers(S.settings, {
-      questions,
-      resumeText: resumeToText(t?.resume || S.base),
-      profile: S.profile,
-      job: { ...posting, company: jobLabel().company, role: jobLabel().role },
-    });
-    const byId = Object.fromEntries(answers.map((a) => [a.qid, a.answer]));
-    S.answers = questions.map((q) => ({ ...q, answer: byId[q.qid] || "" }));
-    const n = await Page.fillAnswers(S.tab, answers.filter((a) => a.answer));
-    toast(`Drafted ${n} answer${n === 1 ? "" : "s"}. Review them before submitting.`);
+    if (pending.length && aiReady()) {
+      let posting = S.posting[S.job.key];
+      if (!posting) posting = await Page.readJobPosting(S.tab).catch(() => ({ text: "" }));
+      const t = currentTailored();
+      const out = await AI.rewriteAndAnswer(S.settings, {
+        bullets: [],
+        keywords: [],
+        posting: K.trimPosting(posting.text),
+        questions: pending,
+        resumeText: resumeToText(t?.resume || S.base),
+        profile: S.profile,
+        company: jobLabel().company,
+        role: jobLabel().role,
+      });
+      const byId = Object.fromEntries((out.answers || []).map((a) => [a.qid, a.answer]));
+      for (const q of pending) {
+        let ans = (byId[q.qid] || "").trim();
+        if (q.options?.length) ans = Ans.matchOption(q.options, ans) || "";
+        results.push({ ...q, answer: ans, source: ans ? "ai" : "none" });
+      }
+    } else for (const q of pending) results.push({ ...q, answer: "", source: "none" });
+    S.answers = results;
+    const n = await Page.fillAnswers(S.tab, results.filter((a) => a.answer));
+    const fromRules = results.filter((a) => a.answer && a.source !== "ai").length;
+    toast(`Filled ${n} answer${n === 1 ? "" : "s"} (${fromRules} from your profile/saved answers). Review AI drafts before submitting.`);
   });
 }
 
@@ -581,14 +618,22 @@ async function downloadCurrent() {
 
 // -------------------------------------------------------------- JOBS tab
 
-const CATEGORIES = ["", "Software", "AI/ML/Data", "Quant", "Product", "Hardware"];
+const CATEGORIES = ["Software", "AI/ML/Data", "Quant", "Product", "Hardware"];
+
+// Job keys are computed once per list load (URL parsing 5k items per keystroke is slow).
+function withKeys(cache) {
+  for (const j of cache.items) if (!j.key) j.key = Jobs.jobKeyForUrl(j.url);
+  S.jobsByKey = new Map(cache.items.map((j) => [j.key, j]));
+  return cache;
+}
 
 function filteredJobs() {
   const terms = S.jobsQuery.toLowerCase().trim().split(/\s+/).filter(Boolean);
-  const cat = S.jobsCategory.toLowerCase().split("/")[0];
+  const f = S.settings.filters;
   return S.jobsCache.items.filter((j) => {
-    if (S.hideApplied && S.applied[Jobs.jobKeyForUrl(j.url)]) return false;
-    if (cat && !j.category.toLowerCase().includes(cat)) return false;
+    if (S.hideApplied && S.applied[j.key]) return false;
+    if (!Sources.matchesFilters(j, f, S.profile)) return false;
+    if (!terms.length) return true;
     const hay = `${j.company} ${j.title} ${j.locations.join(" ")}`.toLowerCase();
     return terms.every((t) => hay.includes(t));
   });
@@ -597,10 +642,18 @@ function filteredJobs() {
 function renderJobs() {
   const el = $("#tab-jobs");
   const cache = S.jobsCache;
-  if (!cache.items.length && !S.busy.jobs && !S.jobsTried) {
+  if (S.jobsLoaded && !cache.items.length && !S.busy.jobs && !S.jobsTried) {
     S.jobsTried = true;
     refreshJobList();
   }
+  const listWrap = h("div", { class: "joblist-wrap" });
+  const countEl = h("span", {});
+  const update = () => {
+    S.jobsShown = 50;
+    const list = filteredJobs();
+    countEl.textContent = `${list.length} match`;
+    renderJobList(listWrap, list);
+  };
 
   const search = h("input", {
     type: "search",
@@ -608,70 +661,85 @@ function renderJobs() {
     value: S.jobsQuery,
     oninput: debounce((e) => {
       S.jobsQuery = e.target.value;
-      S.jobsShown = 50;
-      renderJobList(el.querySelector(".joblist-wrap"), filteredJobs());
-    }, 200),
+      update();
+    }, 150),
   });
+
+  const f = S.settings.filters;
+  const setF = (k, v) => {
+    f[k] = v;
+    saveSettings();
+    update();
+  };
+  const filterInput = (k, label, ph) => h("label", { class: "field" }, h("span", {}, label), h("input", { type: "text", value: f[k] || "", placeholder: ph, oninput: debounce((e) => setF(k, e.target.value), 250) }));
+  const filters = h(
+    "details",
+    { class: "small", style: { marginTop: "8px" }, open: S.filtersOpen },
+    h("summary", { onclick: () => (S.filtersOpen = !S.filtersOpen) }, "Filters · ", countEl),
+    h(
+      "div",
+      { style: { marginTop: "8px" } },
+      filterInput("include", "Role must include one of", "software, data, machine learning"),
+      filterInput("exclude", "Skip if it mentions", "phd, senior, master"),
+      filterInput("locations", "Locations (any of)", "NY, remote, CA"),
+      h(
+        "div",
+        { class: "chips", style: { marginBottom: "8px" } },
+        CATEGORIES.map((c) =>
+          h(
+            "button",
+            {
+              class: `pill${f.categories.includes(c) ? " good" : ""}`,
+              style: { cursor: "pointer" },
+              onclick: () => {
+                setF("categories", f.categories.includes(c) ? f.categories.filter((x) => x !== c) : [...f.categories, c]);
+                renderJobs();
+              },
+            },
+            c
+          )
+        )
+      ),
+      h(
+        "div",
+        { class: "row" },
+        h("select", { style: { width: "auto" }, onchange: (e) => setF("maxAgeDays", Number(e.target.value)) }, [7, 14, 30, 90, 0].map((d) => h("option", { value: d, selected: f.maxAgeDays === d }, d ? `Posted in last ${d} days` : "Any age"))),
+        h("label", { class: "row" }, h("input", { type: "checkbox", checked: f.respectSponsorship, onchange: (e) => setF("respectSponsorship", e.target.checked) }), "Skip no-sponsorship roles if I need it")
+      )
+    )
+  );
 
   const appliedCount = Object.keys(S.applied).length;
   el.replaceChildren(
+    autopilotCard(),
     h(
       "div",
       { class: "card" },
       search,
+      filters,
       h(
         "div",
         { class: "row", style: { marginTop: "8px" } },
-        h(
-          "select",
-          {
-            style: { width: "auto" },
-            onchange: (e) => {
-              S.jobsCategory = e.target.value;
-              S.jobsShown = 50;
-              renderJobs();
-            },
-          },
-          CATEGORIES.map((c) => h("option", { value: c, selected: S.jobsCategory === c }, c || "All categories"))
-        ),
-        h(
-          "label",
-          { class: "row small" },
-          h("input", {
-            type: "checkbox",
-            checked: S.hideApplied,
-            onchange: (e) => {
-              S.hideApplied = e.target.checked;
-              renderJobs();
-            },
-          }),
-          "Hide applied"
-        ),
+        h("label", { class: "row small" }, h("input", { type: "checkbox", checked: S.hideApplied, onchange: (e) => ((S.hideApplied = e.target.checked), update()) }), "Hide applied"),
         h("span", { class: "spacer" }),
-        h("button", { class: "btn ghost", onclick: refreshJobList, disabled: S.busy.jobs, title: "Refresh list" }, S.busy.jobs ? spinner() : "↻")
+        h("span", { class: "small muted" }, cache.fetchedAt ? `${cache.items.length} jobs from ${S.settings.sources.filter((s) => s.enabled).length} repos · ${timeAgo(cache.fetchedAt)} · ${appliedCount} applied` : S.busy.jobs ? "Loading jobs…" : ""),
+        h("button", { class: "btn ghost", onclick: refreshJobList, disabled: S.busy.jobs, title: "Refresh from GitHub" }, S.busy.jobs ? spinner() : "↻")
       ),
-      h("div", { class: "small muted", style: { marginTop: "6px" } }, cache.fetchedAt ? `${cache.items.length} open internships · updated ${timeAgo(cache.fetchedAt)} · ${appliedCount} applied` : S.busy.jobs ? "Loading jobs…" : "")
+      cache.errors?.length ? h("div", { class: "notice warn small", style: { marginTop: "6px" } }, `Some sources failed: ${cache.errors.join("; ")}`) : null
     ),
-    h("div", { class: "joblist-wrap" })
+    listWrap
   );
-  renderJobList(el.querySelector(".joblist-wrap"), filteredJobs());
+  update();
 }
 
 function renderJobList(wrap, filtered) {
   const rows = filtered.slice(0, S.jobsShown).map((j) => {
-    const key = Jobs.jobKeyForUrl(j.url);
-    const applied = !!S.applied[key];
-    const tailored = !!S.tailored[key];
+    const applied = !!S.applied[j.key];
+    const tailored = !!S.tailored[j.key];
     return h(
       "div",
-      { class: `job${applied ? " applied" : ""}`, onclick: () => openJob(j), title: j.url },
-      h(
-        "div",
-        { class: "meta" },
-        h("div", { class: "company" }, j.company),
-        h("div", { class: "title" }, j.title),
-        h("div", { class: "loc" }, j.locations.join(" · "))
-      ),
+      { class: `job${applied ? " applied" : ""}`, onclick: () => openJob(j), title: `${j.url}\n${(j.sources || []).join(", ")}` },
+      h("div", { class: "meta" }, h("div", { class: "company" }, j.company), h("div", { class: "title" }, j.title), h("div", { class: "loc" }, j.locations.join(" · "))),
       h("div", { style: { textAlign: "right" } }, h("div", { class: "small muted" }, Jobs.ageLabel(j.posted)), applied ? h("span", { class: "pill good" }, "Applied") : tailored ? h("span", { class: "pill" }, "Tailored") : null)
     );
   });
@@ -705,10 +773,174 @@ async function refreshJobList() {
   await withBusy(
     "jobs",
     async () => {
-      S.jobsCache = await Jobs.refreshJobs(S.settings.jobSourceUrl);
+      S.jobsCache = withKeys(await Jobs.refreshJobs(S.settings.sources));
     },
     () => S.activeTab === "jobs" && renderJobs()
   );
+}
+
+// ------------------------------------------------------------- AUTOPILOT
+
+const STATUS_PILL = { queued: "", running: "", applied: "good", review: "info", "needs-you": "warn", manual: "", failed: "bad" };
+const STATUS_LABEL = { queued: "Queued", running: "Working", applied: "Applied", review: "Review & submit", "needs-you": "Needs you", manual: "Apply manually", failed: "Failed" };
+const saveQueue = debounce(() => store.set("autopilotQueue", S.queue), 300);
+
+function autopilotCard() {
+  const ap = S.settings.autopilot;
+  const counts = S.queue.reduce((m, i) => ((m[i.status] = (m[i.status] || 0) + 1), m), {});
+  const card = h(
+    "div",
+    { class: "card" },
+    h("h3", {}, "Autopilot", h("span", { class: "spacer" }), S.autopilotRunning ? h("span", { class: "pill info" }, spinner(), " running") : null),
+    h(
+      "p",
+      { class: "small muted" },
+      `Prepares ${ap.concurrency} applications at a time in background tabs: tailored resume, filled form, answers. `,
+      ap.autoSubmit ? "Submits automatically when nothing had to be written; anything with a typed answer waits for you." : "Auto-submit is off: every application waits for you to submit."
+    )
+  );
+
+  if (!S.autopilotRunning) {
+    const batch = h("select", { style: { width: "auto" } }, [5, 10, 20, 40].map((n) => h("option", { value: n, selected: n === (S.batchSize || 10) }, `next ${n}`)));
+    batch.onchange = (e) => (S.batchSize = Number(e.target.value));
+    card.append(
+      h(
+        "div",
+        { class: "row" },
+        h("button", { class: "btn primary", onclick: () => startAutopilot(S.batchSize || 10), disabled: !hasContent(S.base) || !aiReady() }, "Start Autopilot"),
+        h("span", { class: "small" }, "on the"),
+        batch,
+        h("span", { class: "small" }, "matching jobs")
+      ),
+      !hasContent(S.base) ? h("div", { class: "small muted", style: { marginTop: "6px" } }, "Upload your resume first.") : null
+    );
+  } else {
+    card.append(h("button", { class: "btn", onclick: () => ((S.stopAutopilot = true), toast("Stopping after the current jobs…")) }, "Stop"));
+  }
+
+  if (S.queue.length) {
+    card.append(
+      h(
+        "div",
+        { class: "row small", style: { margin: "8px 0 4px" } },
+        Object.entries(counts).map(([k, n]) => h("span", { class: `pill ${STATUS_PILL[k] || ""}` }, `${STATUS_LABEL[k]} ${n}`)),
+        h("span", { class: "spacer" }),
+        !S.autopilotRunning && h("button", { class: "btn ghost small", onclick: () => ((S.queue = S.queue.filter((i) => !["applied", "manual", "failed"].includes(i.status))), saveQueue(), renderJobs()) }, "Clear finished")
+      )
+    );
+    const order = { running: 0, review: 1, "needs-you": 2, queued: 3, failed: 4, manual: 5, applied: 6 };
+    for (const it of [...S.queue].sort((a, b) => order[a.status] - order[b.status])) card.append(queueRow(it));
+  }
+  return card;
+}
+
+function queueRow(it) {
+  const open = async () => {
+    if (it.tabId) {
+      try {
+        const t = await chrome.tabs.update(it.tabId, { active: true });
+        await chrome.windows.update(t.windowId, { focused: true });
+        return;
+      } catch {}
+    }
+    const t = await chrome.tabs.create({ url: it.job.url });
+    await store.setTabJob(t.id, it.job);
+  };
+  const markApplied = () => {
+    it.status = "applied";
+    it.note = "Marked applied by you";
+    S.applied[it.job.key] = { company: it.job.company, title: it.job.title, url: it.job.url, date: Date.now() };
+    store.set("applied", S.applied);
+    saveQueue();
+    renderJobs();
+  };
+  return h(
+    "div",
+    { class: "change", style: { padding: "6px 8px" } },
+    h(
+      "div",
+      { class: "row" },
+      h("strong", { class: "small" }, it.job.company),
+      h("span", { class: "small muted", style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, it.job.title),
+      h("span", { class: `pill ${STATUS_PILL[it.status] || ""}` }, it.status === "running" ? [spinner(), " "] : null, STATUS_LABEL[it.status])
+    ),
+    it.note ? h("div", { class: "small muted", style: { marginTop: "2px" } }, it.note) : null,
+    ["review", "needs-you", "manual", "failed"].includes(it.status)
+      ? h(
+          "div",
+          { class: "row", style: { marginTop: "4px" } },
+          h("button", { class: "btn ghost small", onclick: open }, it.tabId ? "Go to tab" : "Open"),
+          it.status !== "failed" && h("button", { class: "btn ghost small", onclick: markApplied }, "I submitted it"),
+          h(
+            "button",
+            {
+              class: "btn ghost small",
+              onclick: () => {
+                if (it.status === "failed") {
+                  it.status = "queued";
+                  it.note = "";
+                } else S.queue = S.queue.filter((x) => x !== it);
+                saveQueue();
+                renderJobs();
+              },
+            },
+            it.status === "failed" ? "Retry" : "Remove"
+          )
+        )
+      : null
+  );
+}
+
+async function startAutopilot(n) {
+  const inQueue = new Set(S.queue.map((i) => i.job.key));
+  const picks = filteredJobs()
+    .filter((j) => !S.applied[j.key] && !inQueue.has(j.key))
+    .slice(0, n)
+    .map((j) => ({ id: j.key, job: jobFromListing(j), status: "queued", note: "" }));
+  S.queue.push(...picks);
+  if (!S.queue.some((i) => i.status === "queued")) return toast("No new matching jobs to queue.");
+  S.autopilotRunning = true;
+  S.stopAutopilot = false;
+  saveQueue();
+  renderJobs();
+  const savedAnswers = await store.get("savedAnswers", {});
+  const ctx = {
+    settings: S.settings,
+    profile: S.profile,
+    base: S.base,
+    savedAnswers,
+    tailoredFor: (job) => S.tailored[job.key],
+    saveTailored: async (job, entry) => {
+      S.tailored[job.key] = entry;
+      await store.set("tailored", S.tailored);
+    },
+    resumeFileFor: async (job, t) => {
+      const name = R.fileNameFor(S.settings.fileNamePattern, t?.resume || S.base, S.profile, t?.company || job.company, t?.role || job.title);
+      const pdf = await buildResumePdf(t?.resume || S.base, S.settings);
+      return { name, base64: pdf.base64 };
+    },
+  };
+  const rerender = debounce(() => S.activeTab === "jobs" && renderJobs(), 150);
+  try {
+    await Autopilot.runQueue(S.queue, ctx, {
+      concurrency: S.settings.autopilot.concurrency,
+      shouldStop: () => S.stopAutopilot,
+      onUpdate: (item) => {
+        if (item.status === "applied" && !S.applied[item.job.key]) {
+          S.applied[item.job.key] = { company: item.job.company, title: item.job.title, url: item.job.url, date: Date.now(), auto: true };
+          store.set("applied", S.applied);
+        }
+        saveQueue();
+        rerender();
+      },
+    });
+  } finally {
+    S.autopilotRunning = false;
+    await store.set("autopilotQueue", S.queue);
+    renderJobs();
+    const c = S.queue.reduce((m, i) => ((m[i.status] = (m[i.status] || 0) + 1), m), {});
+    toast(`Autopilot done: ${c.applied || 0} submitted, ${c.review || 0} to review, ${c["needs-you"] || 0} need you.`);
+  }
 }
 
 async function openJob(j) {
@@ -733,7 +965,8 @@ function saveEditing() {
   updateFit();
 }
 
-const updateFit = debounce(() => {
+const updateFit = debounce(async () => {
+  await loadFonts();
   const el = document.getElementById("fit-info");
   if (!el) return;
   const r = editingResume();
@@ -1352,6 +1585,7 @@ function renderSettings() {
     h("div", { class: "grid2" }, sel("workAuthorized", "Authorized to work in the US?", YES_NO), sel("needsSponsorship", "Need visa sponsorship?", YES_NO)),
     h("div", { class: "grid2" }, sel("over18", "18 or older?", YES_NO), sel("willingToRelocate", "Willing to relocate?", YES_NO)),
     pf("howHeard", "How did you hear about us?", "Job board"),
+    pf("salaryExpectation", "Pay expectation (blank = you'll be asked)", "e.g. $40/hr or Open to discussion"),
     h("details", {}, h("summary", { class: "small" }, "Voluntary self-identification (EEO)"), h("div", { style: { marginTop: "8px" } }, eeo("gender", "Gender"), eeo("race", "Race / ethnicity"), eeo("hispanic", "Hispanic or Latino?"), eeo("veteran", "Veteran status"), eeo("disability", "Disability status")))
   );
 
@@ -1413,12 +1647,89 @@ function renderSettings() {
     h("div", { class: "small muted" }, "Downloads go to Downloads/Resumes/ and replace older files with the same name, so you won't end up with \"Resume (100).pdf\".")
   );
 
+  const newSrc = h("input", { type: "text", placeholder: "owner/repo or GitHub URL" });
   const sourceCard = h(
     "div",
     { class: "card" },
-    h("h3", {}, "Job list source"),
-    h("p", { class: "small muted" }, "Any SimplifyJobs-format listings.json. Swap Summer2027-Internships for New-Grad-Positions to see new grad roles."),
-    h("input", { type: "url", value: st.jobSourceUrl, oninput: (e) => ((st.jobSourceUrl = e.target.value.trim()), saveSettings()) })
+    h("h3", {}, "Job sources (GitHub repos)"),
+    h("p", { class: "small muted" }, "Any internship list repo works: SimplifyJobs-style listings.json or a README table. Jobs are merged and de-duplicated."),
+    st.sources.map((src) =>
+      h(
+        "div",
+        { class: "row small", style: { margin: "4px 0" } },
+        h("input", {
+          type: "checkbox",
+          checked: src.enabled,
+          onchange: (e) => {
+            src.enabled = e.target.checked;
+            saveSettings();
+          },
+        }),
+        h("span", { style: { flex: 1 } }, src.label),
+        h(
+          "button",
+          {
+            class: "icon",
+            title: "Remove",
+            onclick: () => {
+              st.sources = st.sources.filter((x) => x !== src);
+              saveSettings();
+              renderSettings();
+            },
+          },
+          "✕"
+        )
+      )
+    ),
+    h(
+      "div",
+      { class: "row", style: { marginTop: "6px", flexWrap: "nowrap" } },
+      newSrc,
+      h(
+        "button",
+        {
+          class: "btn",
+          onclick: async (e) => {
+            const input = newSrc.value.trim();
+            if (!Sources.describeSource(input)) return toast("Enter owner/repo or a GitHub URL.", true);
+            e.target.disabled = true;
+            try {
+              const items = await Sources.fetchSource({ input });
+              st.sources.push({ id: `src-${Date.now()}`, label: input.replace(/^https?:\/\/(www\.)?github\.com\//, ""), input, enabled: true });
+              await store.set("settings", st);
+              toast(`Added: ${items.length} open jobs found.`);
+              renderSettings();
+              refreshJobList();
+            } catch (err) {
+              toast(`Couldn't read that repo: ${err.message}`, true);
+            } finally {
+              e.target.disabled = false;
+            }
+          },
+        },
+        "Add"
+      )
+    )
+  );
+
+  const ap = st.autopilot;
+  const apNum = (k, label, opts) => h("label", { class: "field" }, h("span", {}, label), h("select", { onchange: (e) => ((ap[k] = Number(e.target.value)), saveSettings()) }, opts.map(([v, t]) => h("option", { value: v, selected: ap[k] === v }, t))));
+  const apBool = (k, label) => h("label", { class: "row small", style: { margin: "6px 0" } }, h("input", { type: "checkbox", checked: ap[k], onchange: (e) => ((ap[k] = e.target.checked), saveSettings()) }), label);
+  const autopilotCard = h(
+    "div",
+    { class: "card" },
+    h("h3", {}, "Autopilot"),
+    apBool("autoSubmit", "Submit automatically when no answer had to be typed (typed answers always wait for me)"),
+    apBool("tailor", "Tailor the resume for each job"),
+    apBool("notify", "Notify me about new matching jobs"),
+    apNum("concurrency", "Jobs at once", [1, 2, 3, 4].map((n) => [n, String(n)])),
+    apNum("refreshHours", "Check repos for new jobs", [
+      [0, "Off"],
+      [1, "Every hour"],
+      [3, "Every 3 hours"],
+      [6, "Every 6 hours"],
+      [12, "Every 12 hours"],
+    ])
   );
 
   const updateStatus = h("span", { class: "small" });
@@ -1501,7 +1812,7 @@ function renderSettings() {
     )
   );
 
-  el.replaceChildren(aiCard, profileCard, answersCard, filesCard, sourceCard, updatesCard, dataCard);
+  el.replaceChildren(aiCard, profileCard, answersCard, autopilotCard, sourceCard, filesCard, updatesCard, dataCard);
 }
 
 function hr() {
@@ -1557,17 +1868,34 @@ function renderUpdateBanner(status) {
 // ------------------------------------------------------------------ init
 
 async function init() {
-  const [settings, profile, base, resumePdf, tailored, applied, jobsCache] = await Promise.all([
+  // The 5k-job cache is big: show the panel first, load it right after.
+  const jobsPromise = Jobs.getJobs();
+  const [settings, profile, base, resumePdf, tailored, applied] = await Promise.all([
     store.getSettings(),
     store.getProfile(),
     store.get("resume", null),
     store.get("resumePdf", null),
     store.get("tailored", {}),
     store.get("applied", {}),
-    Jobs.getJobs(),
   ]);
-  Object.assign(S, { settings, profile, base, resumePdf, tailored, applied, jobsCache });
-  await loadFonts();
+  Object.assign(S, { settings, profile, base, resumePdf, tailored, applied });
+  jobsPromise.then((jobsCache) => {
+    S.jobsLoaded = true;
+    if (!S.jobsCache.fetchedAt || jobsCache.fetchedAt > S.jobsCache.fetchedAt) S.jobsCache = withKeys(jobsCache);
+    refreshContext();
+    if (S.activeTab === "jobs") renderJobs();
+    // Refresh in the background if it's stale (>6h).
+    if (Date.now() - jobsCache.fetchedAt > 6 * 3600 * 1000) {
+      Jobs.refreshJobs(settings.sources)
+        .then((c) => {
+          S.jobsCache = withKeys(c);
+          if (S.activeTab === "jobs") renderJobs();
+        })
+        .catch(() => {});
+    }
+  });
+  S.queue = (await store.get("autopilotQueue", [])).map((i) => (i.status === "running" ? { ...i, status: "queued", note: "" } : i));
+  loadFonts(); // in the background; PDF building awaits it
 
   document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 
@@ -1585,16 +1913,6 @@ async function init() {
     const last = await Update.lastStatus();
     renderUpdateBanner(last);
     if (Update.isStale(last)) Update.checkForUpdate(settings).then(renderUpdateBanner).catch(() => {});
-  }
-
-  // Refresh the job list in the background if it's stale (>6h).
-  if (Date.now() - jobsCache.fetchedAt > 6 * 3600 * 1000) {
-    Jobs.refreshJobs(settings.jobSourceUrl)
-      .then((c) => {
-        S.jobsCache = c;
-        if (S.activeTab === "jobs") renderJobs();
-      })
-      .catch(() => {});
   }
 }
 

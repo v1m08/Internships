@@ -68,6 +68,30 @@ One-click updates need a `git clone` and the Claude Code bridge installed from i
 
 Updates never touch your data. Your resume, profile and settings live in the browser, not in the repo folder.
 
+## Autopilot (auto-apply)
+
+**Jobs → Start Autopilot on the next N matching jobs.** It pulls jobs from every repo in **Settings → Job sources**, applies your **Filters** (role keywords, exclusions, locations, categories, age, sponsorship), and works through them a few at a time in background tabs:
+
+1. Opens the posting and clicks through to the application form.
+2. Fills your profile fields and answers standard questions from your saved answers (authorization, sponsorship, "how did you hear", graduation, EEO and so on). No AI is used for these.
+3. Tailors your resume: skills and project order, keywords and one-page fit are computed without AI. Then **one** Claude call rewords bullets and answers whatever questions are left.
+4. Attaches the tailored PDF (named like `Your_Name_Resume_Company.pdf`).
+5. Decides what to do next:
+   - **Nothing had to be typed** (every field came from your profile or saved answers, or was a dropdown/radio choice): it **submits automatically** and checks for the site's confirmation.
+   - **Any typed answer was AI-written** (essays, short answers): the tab stays open as **Review & submit**, with drafts highlighted purple.
+   - **Blocked** (CAPTCHA, login, a missing required field): marked **Needs you**.
+   - **Account-based sites** (Workday, iCIMS, Taleo, Amazon, Microsoft…): marked **Apply manually**.
+
+Settings → Autopilot covers: auto-submit on/off, jobs at once, and background checks for new jobs (with notifications). There is no daily limit; the batch size you pick when starting Autopilot sets how many jobs it works through.
+
+## Speed and consistency
+
+- AI is only used for rewording bullets, essay answers and preference dropdowns, in one call per job. Everything else (keywords, ordering, page fit, standard answers) is plain code and gives the same result every time.
+- AI results are cached by input, so re-running the same job reuses the earlier answer instantly.
+- AI rewrites are checked in code: a rewrite is rejected if it changes a number or adds a tool or skill that isn't on your resume.
+- "Save for next time" on an AI answer reuses it for the same question on later applications, with no AI call.
+- Default model is Sonnet, which is fast. Pick Opus in Settings for the best writing.
+
 ## Daily flow
 
 **Jobs** tab → click a job → **Apply** tab → **Tailor** → **Autofill this page** (click the site's *Apply* button first if the form is on another page) → **Draft answers** → review → Submit on the site → **Mark as applied**.
@@ -96,7 +120,9 @@ Everything (resume, profile, API key, applied list) is stored in `chrome.storage
 extension/          the unpacked extension (no build step needed)
   sidepanel/        UI (vanilla JS modules)
   content/          autofill engine injected into job pages
-  lib/              AI calls, LaTeX generator (latex.js), PDF rendering, storage, job list, updater
+  lib/              sources.js (GitHub repos), keywords.js + answers.js (deterministic),
+                    tailor.js (per-job pipeline), autopilot.js, ai.js, latex.js, pdf.js,
+                    update.js (self-update from GitHub)
   fonts/            CMU Serif (Computer Modern, SIL OFL) for the built-in renderer
   vendor/           bundled @anthropic-ai/sdk and jsPDF
 bridge/             native messaging host that runs Claude Code (`claude -p`), compiles LaTeX, and pulls updates; plus its installer

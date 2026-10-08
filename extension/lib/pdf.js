@@ -280,14 +280,33 @@ function layout(resume, k) {
   return { doc, pages };
 }
 
-// Largest scale (≤ 100% of the template's sizes) that fits on one page.
+const MIN_SCALE = 0.85;
+const STEP = 0.025;
+
+// Largest scale (≤ 100% of the template's sizes, in 2.5% steps) that fits on
+// one page: full size first (the usual case), then a binary search.
 export function renderResume(resume) {
-  let last;
-  for (let k = 1; k >= 0.849; k -= 0.025) {
-    last = layout(resume, k);
-    if (last.pages === 1) return { ...last, size: Math.round(11 * k * 10) / 10 };
+  const full = layout(resume, 1);
+  if (full.pages === 1) return { ...full, size: 11 };
+  const smallest = layout(resume, MIN_SCALE);
+  if (smallest.pages > 1) return { ...smallest, size: Math.round(11 * MIN_SCALE * 10) / 10 };
+  let lo = 0; // steps above MIN_SCALE known to fit
+  let hi = Math.round((1 - MIN_SCALE) / STEP); // known not to fit
+  let best = smallest;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    const r = layout(resume, MIN_SCALE + mid * STEP);
+    if (r.pages === 1) {
+      lo = mid;
+      best = r;
+    } else hi = mid;
   }
-  return { ...last, size: 9.4 };
+  return { ...best, size: Math.round(11 * (MIN_SCALE + lo * STEP) * 10) / 10 };
+}
+
+// Cheap check used while tailoring: does it fit at the smallest allowed size?
+export function fitsOnePage(resume) {
+  return layout(resume, MIN_SCALE).pages === 1;
 }
 
 export function resumeToBase64(resume) {

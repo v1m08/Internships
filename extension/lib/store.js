@@ -1,15 +1,26 @@
 // Thin wrappers over chrome.storage.local. Everything stays on this device.
+import { DEFAULT_SOURCES, DEFAULT_FILTERS } from "./sources.js";
+
+export const DEFAULT_AUTOPILOT = {
+  autoSubmit: true, // submit when no typed answer had to be written (you allowed this)
+  tailor: true,
+  concurrency: 2, // jobs prepared at the same time
+  refreshHours: 3, // background refresh of job sources; 0 = off
+  notify: true,
+};
 
 export const DEFAULT_SETTINGS = {
   provider: "claude-code", // "claude-code" (subscription via bridge) | "api"
-  ccModel: "default",
+  ccModel: "sonnet",
   aiVerified: false,
   apiKey: "",
-  model: "claude-opus-5-5",
+  model: "claude-sonnet-5-5",
   fileNamePattern: "{First}_{Last}_Resume_{Company}",
-  font: "times",
+  renderer: "latex", // "latex" (via bridge when TeX is installed) | "built-in"
   attachWhenUntailored: "generated", // "generated" | "original"
-  jobSourceUrl: "https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/.github/scripts/listings.json",
+  sources: DEFAULT_SOURCES,
+  filters: DEFAULT_FILTERS,
+  autopilot: DEFAULT_AUTOPILOT,
   // Where JobPilot updates come from. Point this at your own fork if you have one.
   updateRepo: "v1m08/Internships",
   updateBranch: "main",
@@ -44,6 +55,7 @@ export const DEFAULT_PROFILE = {
   willingToRelocate: "yes",
   howHeard: "Job board",
   availableStart: "",
+  salaryExpectation: "",
   pronouns: "",
   gender: "Decline to self-identify",
   race: "Decline to self-identify",
@@ -62,7 +74,10 @@ export async function set(key, value) {
 }
 
 export async function getSettings() {
-  return { ...DEFAULT_SETTINGS, ...(await get("settings", {})) };
+  const s = { ...DEFAULT_SETTINGS, ...(await get("settings", {})) };
+  s.filters = { ...DEFAULT_FILTERS, ...s.filters };
+  s.autopilot = { ...DEFAULT_AUTOPILOT, ...s.autopilot };
+  return s;
 }
 
 export async function getProfile() {

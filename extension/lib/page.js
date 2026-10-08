@@ -66,3 +66,52 @@ export async function fillAnswers(tab, answers) {
   const counts = await runInFrames(tab.id, (a) => window.__jobpilot.fillAnswers(a), [answers]);
   return counts.reduce((a, b) => a + b, 0);
 }
+
+// ------------------------------------------------------------- autopilot
+
+// Run a window.__jobpilot function in every frame; returns per-frame results.
+export async function callAll(tab, name, args = []) {
+  await inject(tab.id);
+  return runInFrames(tab.id, (n, a) => window.__jobpilot[n](...a), [name, args]);
+}
+
+export function waitForLoad(tabId, timeoutMs = 30000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      clearTimeout(timer);
+      resolve();
+    };
+    const listener = (id, info) => id === tabId && info.status === "complete" && finish();
+    const timer = setTimeout(finish, timeoutMs);
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId).then((t) => t.status === "complete" && finish(), finish);
+  });
+}
+
+// Wait until the page's form stops growing (single-page apps render late)
+// instead of sleeping a fixed time. Returns the last form size.
+export async function waitForForm(tab, { timeoutMs = 8000, minControls = 3 } = {}) {
+  await waitForLoad(tab.id);
+  const start = Date.now();
+  let last = -1;
+  let stable = 0;
+  let size = { controls: 0, files: 0 };
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const stats = await callAll(tab, "formStats");
+      size = { controls: stats.reduce((a, s) => a + s.controls, 0), files: stats.reduce((a, s) => a + s.fileInputs, 0) };
+    } catch {}
+    if (size.controls === last) {
+      stable++;
+      // A real form settles fast; a page without one gets ~1s to prove it.
+      if ((size.controls >= minControls && stable >= 2) || stable >= 4) break;
+    } else stable = 0;
+    last = size.controls;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return size;
+}
