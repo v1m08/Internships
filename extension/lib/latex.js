@@ -85,8 +85,8 @@ function runTex(r) {
 }
 const runsTex = (runs) => runs.map(runTex).join("");
 
-function preamble(k) {
-  const P = M.page;
+function preamble(k, side = M.page.side) {
+  const P = { ...M.page, side };
   const rowW = M.rowWidth * (P.w - 2 * P.side);
   return String.raw`%-------------------------
 % Resume in LaTeX, in the style of Jake Gutierrez's template
@@ -220,5 +220,22 @@ export function resumeToLatex(resume, scale = 1) {
     }
   }
   out.push("", "\\end{document}", "");
+  return out.join("\n");
+}
+
+// Cover letter: the resume's header and fonts, letter-width margins.
+export const LETTER = { side: 54, size: 10, lead: 13, gap: 8, headerGap: 24 };
+
+export function coverToLatex(basics, letter, dateText) {
+  const b = basics || {};
+  const k = 1;
+  const out = [preamble(k, LETTER.side), "\\begin{document}", ""];
+  if (b.name) out.push(`{\\centering \\sz{${fs(M.size.name)}}\\textbf{${escapeTex(b.name)}}\\par}`);
+  const contact = contactItems(b).map((c) => runTex({ t: c.t, style: "normal", u: !!c.url, url: c.url }));
+  if (contact.length) out.push(`\\vspace{${n(M.gap.nameToContact - LEAD)}}`, `{\\centering \\sz{${fs(M.size.contact)}}${contact.join(" $|$ ")}\\par}`);
+  const para = (t) => `{\\fontsize{${fs(LETTER.size)}}{${n(LETTER.lead)}}\\selectfont ${escapeTex(t)}\\par}`;
+  out.push(`\\vspace{${n(LETTER.headerGap)}}`, para(dateText || ""), `\\vspace{${n(LETTER.gap)}}`, para(letter.greeting));
+  for (const p of letter.paragraphs) out.push(`\\vspace{${n(LETTER.gap)}}`, para(p));
+  out.push(`\\vspace{${n(LETTER.gap)}}`, para(letter.signoff), para(b.name || ""), "", "\\end{document}", "");
   return out.join("\n");
 }

@@ -2,13 +2,14 @@ import * as store from "../lib/store.js";
 import * as R from "../lib/resume.js";
 import * as AI from "../lib/ai.js";
 import { renderResume, resumeToText, loadFonts } from "../lib/pdf.js";
-import { buildResumePdf, latexStatus, resetLatexStatus, texFor } from "../lib/render.js";
+import { buildResumePdf, latexStatus, resetLatexStatus, texFor, buildCoverPdf } from "../lib/render.js";
 import * as Jobs from "../lib/jobs.js";
 import * as Page from "../lib/page.js";
 import * as Update from "../lib/update.js";
 import * as L from "../lib/layout.js";
 import * as G from "../lib/grad.js";
 import { resolveStuck } from "../lib/resolve.js";
+import * as C from "../lib/cover.js";
 import * as Sources from "../lib/sources.js";
 import * as Autopilot from "../lib/autopilot.js";
 import * as Ans from "../lib/answers.js";
@@ -24,6 +25,7 @@ const S = {
   resumePdf: null, // { name, base64 } originally uploaded file
   tailored: {}, // jobKey -> { company, role, url, resume, changeCount, keywords, missing, createdAt }
   applied: {}, // jobKey -> { company, title, url, date }
+  cover: null, // your cover letter template (lib/cover.js)
   jobsCache: { fetchedAt: 0, items: [] },
   tab: null,
   job: null, // { key, company, title, url, listingId? }
@@ -216,6 +218,15 @@ async function resumeFileForJob() {
   return null;
 }
 
+// This job's cover letter as a file, or null (none written, not tailored
+// with it, or turned off in Settings).
+async function coverFileForJob() {
+  const t = currentTailored();
+  if (!t?.cover || S.settings.coverAttach === "off") return null;
+  const name = resumeNameForJob().replace(/Resume/i, "Cover_Letter").replace(/^(?!.*Cover_Letter)(.*)\.pdf$/, "$1_Cover_Letter.pdf");
+  return { name, ...(await buildCoverPdf(S.base.basics, t.cover, S.settings)) };
+}
+
 function base64ToBlobUrl(base64, type = "application/pdf") {
   const bin = atob(base64);
   const bytes = new Uint8Array(bin.length);
@@ -351,7 +362,7 @@ function tailorCard(hasKey) {
             h(
               "div",
               {},
-              h("div", { class: "where" }, { bullet: "Bullet", line: "Skills", hide: "Hide bullet", order: "Reorder", summary: "Summary", grad: "Graduation" }[c.type], " · ", c.where),
+              h("div", { class: "where" }, { bullet: "Bullet", line: "Skills", hide: "Hide bullet", order: "Reorder", summary: "Summary", grad: "Graduation", cover: "Cover letter" }[c.type], " · ", c.where),
               h("div", { class: "before" }, c.before),
               h("div", { class: "after" }, c.after),
               c.reason && h("div", { class: "reason" }, c.reason)
@@ -373,7 +384,15 @@ function tailorCard(hasKey) {
 
   if (t) {
     card.append(
-      h("div", { class: "notice good" }, `Tailored for ${t.company || "this job"}${t.role ? ` (${t.role})` : ""}: ${t.changeCount} change${t.changeCount === 1 ? "" : "s"}.`),
+      h("div", { class: "notice good" }, `Tailored for ${t.company || "this job"}${t.role ? ` (${t.role})` : ""}: ${t.changeCount} change${t.changeCount === 1 ? "" : "s"}${t.cover ? ", with a cover letter" : ""}.`),
+      t.cover
+        ? h(
+            "div",
+            { class: "row", style: { marginTop: "6px" } },
+            h("button", { class: "btn ghost", onclick: () => withBusy("coverPreview", async () => { const f = await coverFileForJob(); if (f) chrome.tabs.create({ url: base64ToBlobUrl(f.base64) }); }) }, "Preview cover letter"),
+            h("button", { class: "btn ghost", onclick: () => withBusy("coverDl", async () => { const f = await coverFileForJob(); if (!f) return toast("Cover letters are off in Settings.", true); await downloadBase64(f.base64, f.name); toast(`Saved Downloads/Resumes/${f.name}`); }) }, "Download cover letter")
+          )
+        : null,
       h(
         "div",
         { class: "row", style: { marginTop: "8px" } },
@@ -424,8 +443,8 @@ async function startTailor() {
       const meta = (await Page.callAll(S.tab, "jobMeta")).find((m) => m.company || m.role) || {};
       job = { company: job.company || meta.company || "", title: job.title || meta.role || "" };
     }
-    const prep = await prepareJob({ settings: S.settings, base: S.base, posting, job, profile: S.profile, useAI: aiReady() });
-    S.pending = { company: prep.company, role: prep.role, keywords: prep.keywords, missing: prep.missing, changes: prep.changes, grad: prep.grad, gradNote: prep.gradNote };
+    const prep = await prepareJob({ settings: S.settings, base: S.base, posting, job, profile: S.profile, useAI: aiReady(), cover: S.cover });
+    S.pending = { company: prep.company, role: prep.role, keywords: prep.keywords, missing: prep.missing, changes: prep.changes, grad: prep.grad, gradNote: prep.gradNote, coverTemplate: prep.coverTemplate };
   });
 }
 
@@ -441,6 +460,7 @@ function acceptTailoring() {
     keywords: p.keywords,
     missing: p.missing,
     grad: gradIfAccepted(p, accepted),
+    cover: p.coverTemplate ? C.letterFromChanges(p.coverTemplate, accepted, { company: p.company, role: p.role }) : null,
     createdAt: Date.now(),
   };
   // Keep the 40 most recent tailored versions.
@@ -479,7 +499,8 @@ async function doAutofill() {
   await withBusy("fill", async () => {
     const file = await resumeFileForJob();
     const profile = profileForJob();
-    const report = await Page.autofill(S.tab, { profile, resumeFile: file });
+    const coverFile = await coverFileForJob().catch(() => null);
+    const report = await Page.autofill(S.tab, { profile, resumeFile: file, coverFile, coverOnlyIfRequired: S.settings.coverAttach === "required" });
     // Then one short Claude pass for whatever the rules couldn't fill.
     if (aiReady() && report.controls) {
       try {
@@ -945,6 +966,15 @@ async function startAutopilot(n) {
       const pdf = await buildResumePdf(t?.resume || S.base, S.settings);
       return { name, base64: pdf.base64 };
     },
+    // Autopilot letters are only your own paragraphs (no Claude sentence).
+    cover: S.cover,
+    coverFileFor: async (job, t) => {
+      if (!t?.cover || S.settings.coverAttach === "off") return null;
+      const name = R.fileNameFor(S.settings.fileNamePattern, t.resume || S.base, S.profile, t.company || job.company, t.role || job.title).replace(/Resume/i, "Cover_Letter");
+      const pdf = await buildCoverPdf(S.base.basics, t.cover, S.settings);
+      return { name: /Cover_Letter/.test(name) ? name : name.replace(/\.pdf$/, "_Cover_Letter.pdf"), base64: pdf.base64 };
+    },
+    coverOnlyIfRequired: S.settings.coverAttach === "required",
   };
   const rerender = debounce(() => S.activeTab === "jobs" && renderJobs(), 150);
   try {
@@ -1250,6 +1280,7 @@ function renderResumeTab() {
       )
     )
   );
+  if (S.editing === "base") parts.push(coverCard());
   el.replaceChildren(...parts);
   updateFit();
 }
@@ -1434,6 +1465,127 @@ function sectionCard(r, s, si) {
     );
   }
   return card;
+}
+
+// ------------------------------------------------------- cover letter
+
+const saveCover = debounce(() => store.set("coverLetter", S.cover), 400);
+
+function coverCard() {
+  const c = S.cover;
+  const field = (key, label, placeholder, rows = 3) =>
+    h(
+      "label",
+      { class: "field" },
+      h("span", {}, label),
+      textarea({
+        rows,
+        value: c[key] || "",
+        placeholder,
+        oninput: (e) => {
+          c[key] = e.target.value;
+          saveCover();
+          status();
+        },
+      })
+    );
+  const line = (key, label, placeholder) =>
+    h("label", { class: "field" }, h("span", {}, label), h("input", { type: "text", value: c[key] || "", placeholder, oninput: (e) => ((c[key] = e.target.value), saveCover()) }));
+  const rerender = () => (saveCover(), renderResumeTab());
+
+  const state = h("div", { class: "small", style: { margin: "6px 0" } });
+  const status = () =>
+    state.replaceChildren(
+      C.coverReady(c)
+        ? h("span", { class: "pill good" }, "Ready: tailoring will build a letter for each job")
+        : h("span", { class: "pill warn", style: { whiteSpace: "normal" } }, "Add an opening, a closing and at least one experience paragraph to turn it on")
+    );
+  status();
+
+  const stories = c.stories.map((st, i) =>
+    h(
+      "div",
+      { class: "entry" },
+      h(
+        "div",
+        { class: "head" },
+        h("input", { type: "text", value: st.title, placeholder: "Short name (e.g. ML research at Princeton)", oninput: (e) => ((st.title = e.target.value), saveCover()) }),
+        h("button", { class: "icon", title: "Move up", onclick: () => (move(c.stories, i, -1), rerender()) }, "↑"),
+        h("button", { class: "icon", title: "Delete", onclick: () => (c.stories.splice(i, 1), rerender()) }, "✕")
+      ),
+      textarea({
+        rows: 3,
+        value: st.text,
+        placeholder: "2–3 sentences in your own words: what you did, how, and the result. Concrete beats impressive.",
+        oninput: (e) => {
+          st.text = e.target.value;
+          saveCover();
+          status();
+        },
+      })
+    )
+  );
+
+  // Empty paragraphs named after your experience and projects (you write them).
+  const fromResume = () => {
+    const have = new Set(c.stories.map((x) => x.title.toLowerCase()));
+    for (const sec of S.base?.sections || []) {
+      if (sec.kind !== "entries" || !/experience|project|research|leadership/i.test(sec.title)) continue;
+      for (const e of sec.entries) {
+        const title = [e.subtitle, e.title].filter(Boolean).join(" at ").slice(0, 80);
+        if (title && !have.has(title.toLowerCase())) c.stories.push({ id: R.uid("st"), title, text: "" });
+      }
+    }
+    rerender();
+  };
+
+  const preview = async () => {
+    const picks = C.pickStories(c, "").map((p) => p.s.id);
+    const letter = C.buildLetter(c, { company: "Acme Robotics", role: "Software Engineering Intern", picks });
+    const pdf = await buildCoverPdf(S.base.basics, letter, S.settings);
+    chrome.tabs.create({ url: base64ToBlobUrl(pdf.base64) });
+  };
+
+  return h(
+    "details",
+    { class: "card", open: S.coverOpen ?? false, ontoggle: (e) => (S.coverOpen = e.target.open) },
+    h("summary", {}, h("strong", {}, "Cover letter"), h("span", { class: "small muted" }, " (optional)")),
+    h(
+      "p",
+      { class: "small muted" },
+      "Write it once, in your own words. For each job, JobPilot keeps your opening, \"why\" and closing, picks the experience paragraphs that best match the posting, and fills in {Company} and {Role}. Hiring managers mark down generic or AI-sounding letters, so Claude only adds one sentence about the posting where you put {Hook}, and lightly rewords your paragraphs toward its terms. You approve both, and Autopilot leaves them out."
+    ),
+    h(
+      "ul",
+      { class: "small muted", style: { paddingLeft: "18px", margin: "4px 0 8px" } },
+      h("li", {}, "Under a page: an opening, 1–2 experience paragraphs, why this company, a short close."),
+      h("li", {}, "Tie each paragraph to something you actually did, with a concrete detail or number."),
+      h("li", {}, "Skip flowery lines (\"I am passionate about…\"). Plain and specific reads as you.")
+    ),
+    state,
+    line("greeting", "Greeting", "Dear Hiring Manager,"),
+    field("opening", "Opening", "I'm a first-year Computer Science student at Georgia Tech applying for the {Role} position at {Company}. Say in a sentence what you'd bring or why this kind of work."),
+    h("div", { class: "small", style: { fontWeight: 600, margin: "10px 0 4px" } }, "Experience paragraphs"),
+    stories,
+    h(
+      "div",
+      { class: "row", style: { margin: "6px 0 10px" } },
+      h("button", { class: "btn small", onclick: () => (c.stories.push({ id: R.uid("st"), title: "", text: "" }), rerender()) }, "+ Paragraph"),
+      h("button", { class: "btn ghost small", onclick: fromResume }, "Add one per resume entry"),
+      h(
+        "label",
+        { class: "small" },
+        "Use ",
+        h("select", { onchange: (e) => ((c.perLetter = Number(e.target.value)), saveCover()) }, [1, 2, 3].map((v) => h("option", { value: v, selected: (c.perLetter || 2) === v }, v))),
+        " per letter"
+      )
+    ),
+    field("why", "Why this company", "What draws me to {Company}: {Hook} Then a sentence or two of your own on why this kind of work matters to you."),
+    line("hookFallback", "If Claude has nothing specific for {Hook}, use", "you build things people actually use."),
+    field("closing", "Closing", "Thank you for your time. I'd welcome the chance to talk about how I could contribute this summer.", 2),
+    line("signoff", "Sign-off", "Sincerely,"),
+    h("div", { class: "row", style: { marginTop: "8px" } }, h("button", { class: "btn", onclick: () => withBusy("coverPreview", preview, renderResumeTab), disabled: !C.coverReady(c) }, "Preview with a sample company"))
+  );
 }
 
 // ---------------------------------------------------------- SETTINGS tab
@@ -1696,6 +1848,20 @@ function renderSettings() {
         ].map(([v, t]) => h("option", { value: v, selected: st.attachWhenUntailored === v }, t))
       )
     ),
+    h(
+      "label",
+      { class: "field" },
+      h("span", {}, "Cover letter (written in Resume → Cover letter)"),
+      h(
+        "select",
+        { onchange: (e) => ((st.coverAttach = e.target.value), saveSettings()) },
+        [
+          ["any", "Attach it whenever the form has a cover letter field"],
+          ["required", "Only when the cover letter is required"],
+          ["off", "Never attach"],
+        ].map(([v, t]) => h("option", { value: v, selected: (st.coverAttach || "any") === v }, t))
+      )
+    ),
     h("div", { class: "small muted" }, "Downloads go to Downloads/Resumes/ and replace older files with the same name, so you won't end up with \"Resume (100).pdf\".")
   );
 
@@ -1922,15 +2088,16 @@ function renderUpdateBanner(status) {
 async function init() {
   // The 5k-job cache is big: show the panel first, load it right after.
   const jobsPromise = Jobs.getJobs();
-  const [settings, profile, base, resumePdf, tailored, applied] = await Promise.all([
+  const [settings, profile, base, resumePdf, tailored, applied, cover] = await Promise.all([
     store.getSettings(),
     store.getProfile(),
     store.get("resume", null),
     store.get("resumePdf", null),
     store.get("tailored", {}),
     store.get("applied", {}),
-  ]);
-  Object.assign(S, { settings, profile, base, resumePdf, tailored, applied });
+    store.get("coverLetter", null),
+  ]).then((r) => ((r[6] = { ...C.DEFAULT_COVER, ...(r[6] || {}) }), r));
+  Object.assign(S, { settings, profile, base, resumePdf, tailored, applied, cover });
   jobsPromise.then((jobsCache) => {
     S.jobsLoaded = true;
     if (!S.jobsCache.fetchedAt || jobsCache.fetchedAt > S.jobsCache.fetchedAt) S.jobsCache = withKeys(jobsCache);

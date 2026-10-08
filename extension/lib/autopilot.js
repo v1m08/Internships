@@ -84,6 +84,7 @@ export async function runJob(job, ctx) {
       questions,
       useAI: true,
       autopilot: true,
+      cover: ctx.cover,
     });
     if (!tailored && ctx.settings.autopilot.tailor) {
       tailored = tailoredEntry(ctx.base, prep, job.url);
@@ -92,7 +93,8 @@ export async function runJob(job, ctx) {
 
     // Attach the resume (second pass also catches fields that appeared late).
     const file = await ctx.resumeFileFor(job, tailored);
-    const report = await Page.autofill(tab, { profile: G.profileWithGrad(ctx.profile, tailored ? tailored.grad : prep.grad), resumeFile: file });
+    const coverFile = ctx.coverFileFor ? await ctx.coverFileFor(job, tailored).catch(() => null) : null;
+    const report = await Page.autofill(tab, { profile: G.profileWithGrad(ctx.profile, tailored ? tailored.grad : prep.grad), resumeFile: file, coverFile, coverOnlyIfRequired: ctx.coverOnlyIfRequired });
     const toFill = prep.answers.filter((a) => a.answer);
     if (toFill.length) await Page.fillAnswers(tab, toFill);
     const attested = (await Page.callAll(tab, "checkAttestations")).reduce((a, b) => a + b, 0);

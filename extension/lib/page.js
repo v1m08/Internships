@@ -55,6 +55,7 @@ export async function autofill(tab, payload) {
     merged.skippedFilled += r.skippedFilled;
     merged.controls += r.controls;
     merged.attached = merged.attached || r.attached;
+    merged.coverAttached = merged.coverAttached || r.coverAttached || null;
   }
   return merged;
 }

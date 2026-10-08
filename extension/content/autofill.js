@@ -545,7 +545,7 @@
     return [...document.querySelectorAll(CONTROL_SEL)].filter((el) => !el.disabled && !el.readOnly && isVisible(el) && !isShadowInput(el));
   }
 
-  async function fill({ profile, resumeFile }) {
+  async function fill({ profile, resumeFile, coverFile = null, coverOnlyIfRequired = false }) {
     clearMarks();
     const report = { url: location.href, filled: [], review: [], attached: null, skippedFilled: 0, controls: 0 };
     const doneGroups = new Set();
@@ -568,6 +568,20 @@
           mark(target.el.closest('[class*="upload" i], [class*="file" i], [class*="resume" i]') || target.el.parentElement || target.el, "filled", "resume attached");
         } catch (e) {
           report.review.push({ label: "Resume upload", reason: "Couldn't attach automatically: " + e.message });
+        }
+      }
+    }
+
+    // Cover letter upload (only when one was prepared for this job).
+    if (coverFile) {
+      const field = all.find((el) => el.type === "file" && /cover/.test(norm(descriptor(el, labelFor(el)))) && !(el.files && el.files.length));
+      if (field && !(coverOnlyIfRequired && !isRequired(field, labelFor(field)))) {
+        try {
+          attachFile(field, coverFile);
+          report.coverAttached = coverFile.name;
+          mark(field.closest('[class*="upload" i], [class*="file" i]') || field.parentElement || field, "filled", "cover letter attached");
+        } catch (e) {
+          report.review.push({ label: "Cover letter upload", reason: "Couldn't attach automatically: " + e.message });
         }
       }
     }

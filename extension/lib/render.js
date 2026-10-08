@@ -2,8 +2,8 @@
 // (through the Claude Code bridge) when a TeX engine is installed;
 // otherwise the built-in Computer Modern renderer (pdf.js), which
 // reproduces the same layout.
-import { resumeToLatex } from "./latex.js";
-import { resumeToBase64, renderResume, loadFonts, MIN_FIT_SCALE, FIT_STEP } from "./pdf.js";
+import { resumeToLatex, coverToLatex } from "./latex.js";
+import { resumeToBase64, renderResume, loadFonts, MIN_FIT_SCALE, FIT_STEP, coverToBase64 } from "./pdf.js";
 import { bridge } from "./ai.js";
 
 const cache = new Map(); // tex -> { base64, engine }
@@ -83,4 +83,24 @@ export async function buildResumePdf(resume, settings) {
 
 export function pageCount(resume) {
   return renderResume(resume).pages;
+}
+
+// Cover letter PDF, same engine choice as the resume.
+export const letterDate = () => new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+
+export async function buildCoverPdf(basics, letter, settings) {
+  const date = letterDate();
+  const wantLatex = settings.renderer !== "built-in" && settings.provider === "claude-code";
+  if (wantLatex && !latexUnavailable) {
+    try {
+      const tex = coverToLatex(basics, letter, date);
+      if (!cache.has(tex)) {
+        const r = await bridge({ type: "latex", tex });
+        cache.set(tex, { base64: r.pdfBase64, engine: r.engine, pages: r.pages });
+      }
+      return cache.get(tex);
+    } catch {}
+  }
+  await loadFonts();
+  return { base64: coverToBase64(basics, letter, date), engine: "built-in" };
 }

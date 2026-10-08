@@ -299,6 +299,59 @@ export function resumeToBlobUrl(resume) {
   return URL.createObjectURL(doc.output("blob"));
 }
 
+// Cover letter with the resume's header and fonts (same numbers as latex.js
+// coverToLatex).
+export function coverToBase64(basics, letter, dateText) {
+  const { doc, family } = newDoc();
+  const L = { side: 54, size: 10, lead: 13, gap: 8, headerGap: 24 };
+  const b = basics || {};
+  let y = M.page.top + 27.2;
+  if (b.name) {
+    doc.setFont(family, "bold");
+    doc.setFontSize(M.size.name);
+    doc.text(clean(b.name), PAGE_W / 2, y, { align: "center" });
+  }
+  const contact = contactItems(b).map((c) => ({ ...c, t: clean(c.t) }));
+  if (contact.length) {
+    y += M.gap.nameToContact;
+    doc.setFont(family, "normal");
+    doc.setFontSize(M.size.contact);
+    const sep = " | ";
+    const total = contact.reduce((a, c, i) => a + doc.getTextWidth(c.t) + (i ? doc.getTextWidth(sep) : 0), 0);
+    let x = (PAGE_W - total) / 2;
+    contact.forEach((c, i) => {
+      if (i) {
+        doc.text(sep, x, y);
+        x += doc.getTextWidth(sep);
+      }
+      const w = doc.getTextWidth(c.t);
+      doc.text(c.t, x, y);
+      if (c.url) {
+        doc.setLineWidth(0.4);
+        doc.line(x, y + 1.6, x + w, y + 1.6);
+        doc.link(x, y - 7, w, 9, { url: c.url });
+      }
+      x += w;
+    });
+  }
+  doc.setFont(family, "normal");
+  doc.setFontSize(L.size);
+  const para = (text, gapBefore) => {
+    const lines = doc.splitTextToSize(clean(text), PAGE_W - 2 * L.side);
+    lines.forEach((line, i) => {
+      y += i === 0 ? L.lead + gapBefore : L.lead;
+      doc.text(line, L.side, y);
+    });
+  };
+  para(dateText || "", L.headerGap);
+  para(letter.greeting, L.gap);
+  for (const p of letter.paragraphs) para(p, L.gap);
+  para(letter.signoff, L.gap);
+  para(b.name || "", 0);
+  const uri = doc.output("datauristring");
+  return uri.slice(uri.indexOf(",") + 1);
+}
+
 // Plain text version for AI prompts.
 export function resumeToText(resume) {
   const out = [];

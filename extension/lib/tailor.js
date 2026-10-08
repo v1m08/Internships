@@ -5,6 +5,7 @@ import * as K from "./keywords.js";
 import * as A from "./answers.js";
 import * as R from "./resume.js";
 import * as G from "./grad.js";
+import * as C from "./cover.js";
 import { rewriteAndAnswer } from "./ai.js";
 import { fitsOnePage, resumeToText, loadFonts } from "./pdf.js";
 
@@ -38,12 +39,14 @@ function fitOnePage(resume, weights) {
 
 /**
  * opts: { settings, base, posting: {text,url}, job: {company,title}, profile,
- *         savedAnswers, questions = [], useAI = true, autopilot = false }
+ *         savedAnswers, questions = [], useAI = true, autopilot = false, cover }
+ *   cover: your cover letter template (cover.js), if you've written one
  * Returns { company, role, keywords, missing, changes, answers, aiUsed }
  *   answers: [{ qid, answer, source: "rule"|"saved"|"ai", kind, required }]
  */
 export async function prepareJob(opts) {
-  const { settings, base, posting, job = {}, profile, savedAnswers = {}, questions = [], useAI = true, autopilot = false } = opts;
+  const { settings, base, posting, job = {}, profile, savedAnswers = {}, questions = [], useAI = true, autopilot = false, cover = null } = opts;
+  const coverOn = C.coverReady(cover);
   const text = posting?.text || "";
   await loadFonts(); // page-fit checks need the real font metrics
   const resumeText = resumeToText(base);
@@ -57,7 +60,13 @@ export async function prepareJob(opts) {
   // Standard questions without AI.
   const answers = [];
   const pending = [];
+  const coverBoxes = [];
   for (const q of questions) {
+    // A "cover letter" text box gets your letter, not an AI essay.
+    if (coverOn && q.kind === "long_text" && /cover letter/i.test(q.question)) {
+      coverBoxes.push(q);
+      continue;
+    }
     const det = A.answerDeterministically(q, jobProfile, savedAnswers);
     if (det) answers.push({ ...q, answer: det.answer, source: det.source });
     else if (autopilot && !q.required && /text/.test(q.kind)) answers.push({ ...q, answer: "", source: "skipped" }); // optional essays: leave blank
@@ -67,7 +76,15 @@ export async function prepareJob(opts) {
   // One AI call: bullet rewrites (only if the posting shares skills with the resume) + remaining questions.
   let aiUsed = false;
   const bullets = keywords.length ? rewriteCandidates(base).map(({ id, text }) => ({ id, text })) : [];
-  if (useAI && (bullets.length || pending.length)) {
+  // Cover letter: your paragraphs that fit this posting; Claude may add one
+  // sentence where you put {Hook} and polish those paragraphs. Not in
+  // Autopilot, which submits without your review.
+  const coverPicks = coverOn ? C.coverChanges(cover, text, R.uid) : [];
+  const coverAsk =
+    coverOn && !autopilot
+      ? { why: /\{Hook\}/.test(cover.why) ? cover.why : "", stories: coverPicks.map((c) => ({ id: c.target, text: cover.stories.find((s) => s.id === c.target).text })) }
+      : null;
+  if (useAI && (bullets.length || pending.length || coverAsk)) {
     aiUsed = true;
     const out = await rewriteAndAnswer(settings, {
       bullets,
@@ -78,7 +95,21 @@ export async function prepareJob(opts) {
       profile: jobProfile,
       company: job.company,
       role: job.title,
+      cover: coverAsk,
     });
+    if (coverAsk) {
+      const hook = (out.cover_hook || "").trim();
+      if (coverAsk.why && C.validHook(hook, text, cover)) {
+        coverPicks.push({ id: R.uid("c"), type: "cover", sub: "hook", target: "", where: "{Hook} sentence", before: cover.hookFallback || "(left out)", after: hook, reason: "One sentence about this posting, in your why paragraph", accepted: true });
+      }
+      const storyTerms = new Set([...K.termsOf(resumeText), ...K.termsOf(cover.stories.map((s) => s.text).join("\n"))]);
+      for (const ed of out.cover_edits || []) {
+        const s = coverAsk.stories.find((x) => x.id === ed.id);
+        const after = (ed.text || "").trim();
+        if (!s || !K.validRewrite(s.text, after, storyTerms)) continue;
+        coverPicks.push({ id: R.uid("c"), type: "cover", sub: "edit", target: s.id, where: "reworded paragraph", before: s.text, after, reason: "Uses the posting's wording", accepted: true });
+      }
+    }
     const resumeTerms = K.termsOf(resumeText);
     const byId = Object.fromEntries(rewriteCandidates(base).map((b) => [b.id, b]));
     for (const ed of out.bullet_edits || []) {
@@ -109,6 +140,13 @@ export async function prepareJob(opts) {
     for (const q of pending) answers.push({ ...q, answer: "", source: "none" });
   }
 
+  changes.push(...coverPicks);
+  if (coverBoxes.length) {
+    const letter = C.letterFromChanges(cover, changes, { company: job.company, role: job.title });
+    const name = [profile.firstName, profile.lastName].filter(Boolean).join(" ");
+    for (const q of coverBoxes) answers.push({ ...q, answer: letter ? C.letterText(letter, name) : "", source: letter ? "cover" : "none" });
+  }
+
   if (grad?.shifted) {
     const c = G.gradChange(base, profile, grad.date);
     const reason = grad.why ? `Posting: "${grad.why}"` : "Fits the posting's graduation window";
@@ -133,6 +171,7 @@ export async function prepareJob(opts) {
     answers,
     aiUsed,
     grad: grad?.shifted ? grad.date : null,
+    coverTemplate: coverOn ? cover : null,
     gradNote: grad?.outside ? `This posting looks for graduates outside your window ("${grad.why}").` : "",
   };
 }
@@ -153,6 +192,7 @@ export function tailoredEntry(base, prep, url) {
     keywords: prep.keywords,
     missing: prep.missing,
     grad: gradIfAccepted(prep, accepted),
+    cover: prep.coverTemplate ? C.letterFromChanges(prep.coverTemplate, accepted, { company: prep.company, role: prep.role }) : null,
     createdAt: Date.now(),
   };
 }

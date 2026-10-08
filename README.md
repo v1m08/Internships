@@ -62,6 +62,8 @@ Choose **Anthropic API key** in Settings and paste a key from [console.anthropic
 
 **Flexible graduation date (optional).** If you could graduate any time in a range (say Dec 2028 by credits, May 2030 on the normal track), set *Earliest* and *Latest* under **Settings → Application profile → Flexible graduation date**. For each job, JobPilot reads who the posting is for ("graduating between Dec 2028 and Jun 2029", "class of 2029", "first-year students", "rising juniors"…) and picks the date in your range that fits, closest to your usual one. That date goes on that job's tailored resume (shown as a *Graduation* change you can untick) and into that application's graduation and class-year answers. Postings that don't say keep your usual date.
 
+**Cover letter (optional).** In **Resume → Cover letter**, write an opening, a "why this company" paragraph, a closing, and a few short experience paragraphs, all in your own words. For each job, tailoring picks the experience paragraphs that best match the posting and fills in `{Company}` and `{Role}`. If you put `{Hook}` in your why paragraph, Claude writes one sentence there about something specific in the posting, and may lightly reword your chosen paragraphs toward its terms. Those AI parts appear as *Cover letter* changes you can untick, and they're checked like resume rewrites (no new numbers, tools or skills). Autopilot leaves them out. The PDF uses your resume's header and fonts and is attached when a form has a cover letter field (Settings → Files & formatting).
+
 ### 4. Updates
 
 JobPilot checks this repo for new commits every few hours and puts a **↑** badge on its icon when there's an update. Set it up in **Settings → Updates**:
@@ -114,6 +116,8 @@ Colors on the page: **green** = filled, **amber** = needs you, **purple** = AI d
 | Anything else | Best effort, label-based | Best effort |
 
 Multi-page forms: click **Autofill this page** again on each step.
+
+**When autofill gets stuck.** After filling what it can from your profile, JobPilot sends the leftover fields to one short Claude call. Options that match your profile (Degree "Bachelor's Degree" for "Bachelor of Science") are filled green. Choices your profile doesn't state (which term, which team) are filled purple for you to check. Anything that needs your own words, or a fact Claude doesn't have, is left empty and flagged amber. Searchable dropdowns built with react-select (new Greenhouse boards, Ashby and others) are filled through the component itself, so they work even while the side panel has focus.
 
 ## Privacy
 
