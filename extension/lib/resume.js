@@ -1,12 +1,14 @@
 // Resume data model.
 //
 // {
-//   basics: { name, email, phone, location, links: [{ label, url }] },
+//   basics: { name, email, phone, location, links: [{ label, url }], contactOrder: ["phone", "email", "location", "links"] },
 //   summary: "",
 //   sections: [{
 //     id, title, kind: "entries" | "lines" | "text",
-//     entries: [{ id, title, subtitle, location, dates, hidden, bullets: [{ id, text, hidden }] }],
+//     layout: "heading" | "inline" | "row", order: "org-first" | "role-first", datesOn: "top" | "bottom",  (see layout.js)
+//     entries: [{ id, title, subtitle, location, dates, linkLabel, url, orgLink, hidden, bullets: [{ id, text, hidden }] }],
 //     lines:   [{ id, label, text, hidden }],
+//     (bullet and line text may contain **bold** markup)
 //     text: "",
 //   }],
 // }
@@ -18,18 +20,18 @@ export const clone = (o) => JSON.parse(JSON.stringify(o));
 
 export function emptyResume() {
   return {
-    basics: { name: "", email: "", phone: "", location: "", links: [] },
+    basics: { name: "", email: "", phone: "", location: "", links: [], contactOrder: ["phone", "email", "location", "links"] },
     summary: "",
     sections: [],
   };
 }
 
 export function newSection(kind = "entries", title = "New Section") {
-  return { id: uid("s"), title, kind, entries: [], lines: [], text: "" };
+  return { id: uid("s"), title, kind, layout: "heading", order: "org-first", datesOn: "top", entries: [], lines: [], text: "" };
 }
 
 export function newEntry() {
-  return { id: uid("e"), title: "", subtitle: "", location: "", dates: "", hidden: false, bullets: [newBullet()] };
+  return { id: uid("e"), title: "", subtitle: "", location: "", dates: "", linkLabel: "", url: "", orgLink: false, hidden: false, bullets: [newBullet()] };
 }
 
 export function newBullet(text = "") {
@@ -50,18 +52,25 @@ export function fromParsed(p) {
     phone: b.phone || "",
     location: b.location || "",
     links: (b.links || []).filter((l) => l.url).map((l) => ({ label: l.label || "", url: l.url })),
+    contactOrder: b.contact_order?.length ? [...new Set(b.contact_order)] : ["phone", "email", "location", "links"],
   };
   r.summary = p.summary || "";
   r.sections = (p.sections || []).map((s) => ({
     id: uid("s"),
     title: s.title || "",
     kind: ["entries", "lines", "text"].includes(s.kind) ? s.kind : "entries",
+    layout: ["heading", "inline", "row"].includes(s.layout) ? s.layout : "heading",
+    order: s.heading_order === "role-first" ? "role-first" : "org-first",
+    datesOn: s.dates_position === "bottom" ? "bottom" : "top",
     entries: (s.entries || []).map((e) => ({
       id: uid("e"),
       title: e.title || "",
       subtitle: e.subtitle || "",
       location: e.location || "",
       dates: e.dates || "",
+      linkLabel: e.link_label || "",
+      url: e.link_url || "",
+      orgLink: !!e.org_is_link,
       hidden: false,
       bullets: (e.bullets || []).map((t) => newBullet(t)),
     })),

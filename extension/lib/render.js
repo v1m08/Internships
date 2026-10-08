@@ -3,7 +3,7 @@
 // otherwise the built-in Computer Modern renderer (pdf.js), which
 // reproduces the same layout.
 import { resumeToLatex } from "./latex.js";
-import { resumeToBase64, renderResume, loadFonts } from "./pdf.js";
+import { resumeToBase64, renderResume, loadFonts, MIN_FIT_SCALE, FIT_STEP } from "./pdf.js";
 import { bridge } from "./ai.js";
 
 const cache = new Map(); // tex -> { base64, engine }
@@ -17,14 +17,40 @@ export function resetLatexStatus() {
   latexUnavailable = null;
 }
 
+const texCache = new Map(); // resume JSON -> tex that fit on one page
+
+// Start at the scale the built-in renderer found (same layout numbers), then
+// step down while real LaTeX still spills onto a second page.
 async function viaLatex(resume) {
-  const tex = resumeToLatex(resume);
-  if (cache.has(tex)) return cache.get(tex);
-  const r = await bridge({ type: "latex", tex });
-  const out = { base64: r.pdfBase64, engine: r.engine };
-  cache.set(tex, out);
-  if (cache.size > 30) cache.delete(cache.keys().next().value);
-  return out;
+  await loadFonts();
+  const key = JSON.stringify(resume);
+  let scale = texCache.has(key) ? null : renderResume(resume).scale;
+  let tex = texCache.get(key) || resumeToLatex(resume, scale);
+  for (;;) {
+    let out = cache.get(tex);
+    if (!out) {
+      const r = await bridge({ type: "latex", tex });
+      out = { base64: r.pdfBase64, engine: r.engine, pages: r.pages };
+      cache.set(tex, out);
+      if (cache.size > 30) cache.delete(cache.keys().next().value);
+    }
+    if (scale === null || !(out.pages > 1) || scale <= MIN_FIT_SCALE + 1e-9) {
+      texCache.set(key, tex);
+      if (texCache.size > 30) texCache.delete(texCache.keys().next().value);
+      return out;
+    }
+    scale = Math.max(MIN_FIT_SCALE, Math.round((scale - FIT_STEP) * 1000) / 1000);
+    tex = resumeToLatex(resume, scale);
+  }
+}
+
+// The .tex for downloads / Overleaf: the one that compiled to one page, or
+// the built-in renderer's fit if it hasn't been compiled yet.
+export async function texFor(resume) {
+  const key = JSON.stringify(resume);
+  if (texCache.has(key)) return texCache.get(key);
+  await loadFonts();
+  return resumeToLatex(resume, renderResume(resume).scale);
 }
 
 const builtCache = new Map(); // resume JSON -> base64

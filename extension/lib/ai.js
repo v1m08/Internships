@@ -173,13 +173,23 @@ export async function testConnection(settings) {
 // ------------------------------------------------------------------ parse
 
 const PARSE_SCHEMA = obj({
-  basics: obj({ name: str, email: str, phone: str, location: str, links: arr(obj({ label: str, url: str })) }),
+  basics: obj({
+    name: str,
+    email: str,
+    phone: str,
+    location: str,
+    links: arr(obj({ label: str, url: str })),
+    contact_order: arr({ type: "string", enum: ["phone", "email", "location", "links"] }),
+  }),
   summary: str,
   sections: arr(
     obj({
       title: str,
       kind: { type: "string", enum: ["entries", "lines", "text"] },
-      entries: arr(obj({ title: str, subtitle: str, location: str, dates: str, bullets: arr(str) })),
+      layout: { type: "string", enum: ["heading", "inline", "row"] },
+      heading_order: { type: "string", enum: ["org-first", "role-first"] },
+      dates_position: { type: "string", enum: ["top", "bottom"] },
+      entries: arr(obj({ title: str, subtitle: str, location: str, dates: str, link_label: str, link_url: str, org_is_link: { type: "boolean" }, bullets: arr(str) })),
       lines: arr(obj({ label: str, text: str })),
       text: str,
     })
@@ -203,13 +213,24 @@ const PARSE_SCHEMA = obj({
   }),
 });
 
-const PARSE_SYSTEM = `You convert resumes into structured data for an editor. Transcribe faithfully: keep every section, entry and bullet in the original order with the original wording. Do not summarize, merge, improve or invent anything.
+const PARSE_SYSTEM = `You convert resumes into structured data for an editor that re-typesets them, so record both the content and how it is laid out. Transcribe faithfully: keep every section, entry and bullet in the original order with the original wording and punctuation. Do not summarize, merge, improve or invent anything.
 
 Section kinds:
-- "entries": Education, Experience, Projects, Leadership, etc. title = organization/school/project name; subtitle = role/degree; location; dates exactly as written (e.g. "May 2024 – Aug 2024"); bullets = each bullet point.
+- "entries": Education, Experience, Projects, Leadership, Awards, etc. For every entry: title = the organization / school / project / award name; subtitle = the role / degree / tech stack / description; location; dates exactly as written (e.g. "May 2024 – Aug 2024"); bullets = each bullet point (empty for single-line rows).
 - "lines": Skills-style sections made of "Label: items" rows (e.g. label "Languages", text "Python, Java"). If a row has no label, use an empty label.
 - "text": a plain paragraph section.
-Fill unused fields of a section with empty strings/arrays. summary is the resume's summary/objective paragraph if it has one, otherwise "". For links, use full URLs (add https:// when missing) and short labels like "LinkedIn", "GitHub", "Portfolio".
+
+Layout of an "entries" section (for other kinds use "heading", "org-first", "top"):
+- layout "heading": each entry has two heading lines (bold first line, italic second line) with text on the right of both. heading_order "org-first" when the organization/school is on the bold first line and the role/degree below it; "role-first" when the role is on the first line. dates_position "top" when the dates are on the right of the first line (location on the second), "bottom" when the dates are on the second line (location on the first).
+- layout "inline": one heading line per entry like "Name | tech stack" with dates or a link on the right (typical for projects). subtitle = the text after the "|".
+- layout "row": one line per item with no bullets, like "Award Name – description ... 2025" (typical for awards). title = the bold part; subtitle = the rest exactly as written, starting with its separator (e.g. "– Full-ride scholarship" or ", Boy Scouts of America"); dates = the text on the right.
+
+Links in entries: link_label = visible link text shown in the heading (e.g. "GitHub", "Demo"), otherwise "". link_url = that link's URL if you can see it, otherwise "". org_is_link = true when the organization/title text itself is underlined or hyperlinked.
+
+Bold text inside bullets and lines: wrap it in double asterisks, e.g. "**Activities:** AI Safety Initiative". Don't mark text that is bold only because it's a heading or a "lines" label.
+
+contact_order: the order of the items in the contact line under the name, e.g. ["location","phone","email","links"].
+Fill unused fields with empty strings/arrays. summary is the resume's summary/objective paragraph if it has one, otherwise "". For links in basics, use full URLs (add https:// when missing) and short labels like "LinkedIn", "GitHub", "Portfolio".
 
 profile: fields for job application forms, taken only from what the resume states (empty string when not stated). gradMonth is a full month name, gradYear four digits, for the most recent/expected degree. degree like "Bachelor of Science".`;
 
@@ -238,7 +259,7 @@ const JOB_SCHEMA = obj({
 
 const JOB_SYSTEM = `You help a student apply to one internship. Two tasks; either list may be empty.
 
-1. bullet_edits: reword resume bullets so they use the posting's terminology where the SAME work truthfully fits. Only bullets that clearly improve; at most 6. Keep every number and fact; never add tools, skills, metrics or claims that aren't in the bullet or elsewhere in the resume; keep length similar (≤ ~110 characters); start with a strong past-tense verb. Use the given ids.
+1. bullet_edits: reword resume bullets so they use the posting's terminology where the SAME work truthfully fits. Only bullets that clearly improve; at most 6. Keep every number and fact; never add tools, skills, metrics or claims that aren't in the bullet or elsewhere in the resume; keep length similar (≤ ~110 characters); start with a strong past-tense verb; keep any **bold** markup. Use the given ids.
 
 2. answers: answer each listed application question as the student, first person, using only facts from the resume and profile. short_text: a few words to one sentence. long_text: 80–150 words unless the question sets a length; connect the student's real experience to this company and role. single_choice / dropdown / multi_choice: reply with exactly one of the given options' text; for preference questions (team, location, interest area, shift) pick the option that best fits the resume and posting. Answer "" only for factual questions the resume and profile don't cover (e.g. a referrer's name, a specific date, an ID number).`;
 

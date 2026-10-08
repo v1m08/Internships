@@ -2,11 +2,11 @@ import * as store from "../lib/store.js";
 import * as R from "../lib/resume.js";
 import * as AI from "../lib/ai.js";
 import { renderResume, resumeToText, loadFonts } from "../lib/pdf.js";
-import { buildResumePdf, latexStatus, resetLatexStatus } from "../lib/render.js";
-import { resumeToLatex } from "../lib/latex.js";
+import { buildResumePdf, latexStatus, resetLatexStatus, texFor } from "../lib/render.js";
 import * as Jobs from "../lib/jobs.js";
 import * as Page from "../lib/page.js";
 import * as Update from "../lib/update.js";
+import * as L from "../lib/layout.js";
 import * as Sources from "../lib/sources.js";
 import * as Autopilot from "../lib/autopilot.js";
 import * as Ans from "../lib/answers.js";
@@ -220,15 +220,16 @@ async function previewResume(resume) {
   chrome.tabs.create({ url: base64ToBlobUrl(pdf.base64) });
 }
 
-function downloadTex(resume, pdfName) {
-  const tex = resumeToLatex(resume);
+async function downloadTex(resume, pdfName) {
+  const tex = await texFor(resume);
   const b64 = btoa(unescape(encodeURIComponent(tex)));
   return chrome.downloads.download({ url: `data:text/x-tex;base64,${b64}`, filename: `Resumes/${pdfName.replace(/\.pdf$/, ".tex")}`, conflictAction: "overwrite", saveAs: false });
 }
 
 // Opens the .tex as a new Overleaf project (Overleaf's documented /docs endpoint).
-function openInOverleaf(resume) {
-  const form = h("form", { method: "POST", action: "https://www.overleaf.com/docs", target: "_blank", style: { display: "none" } }, h("input", { type: "hidden", name: "encoded_snip", value: encodeURIComponent(resumeToLatex(resume)) }), h("input", { type: "hidden", name: "snip_name", value: "resume.tex" }), h("input", { type: "hidden", name: "engine", value: "pdflatex" }));
+async function openInOverleaf(resume) {
+  const tex = await texFor(resume);
+  const form = h("form", { method: "POST", action: "https://www.overleaf.com/docs", target: "_blank", style: { display: "none" } }, h("input", { type: "hidden", name: "encoded_snip", value: encodeURIComponent(tex) }), h("input", { type: "hidden", name: "snip_name", value: "resume.tex" }), h("input", { type: "hidden", name: "engine", value: "pdflatex" }));
   document.body.append(form);
   form.submit();
   form.remove();
@@ -972,9 +973,9 @@ const updateFit = debounce(async () => {
   const r = editingResume();
   if (!hasContent(r)) return (el.textContent = "");
   try {
-    const { pages, size } = renderResume(r);
+    const { pages, scale } = renderResume(r);
     el.className = `pill ${pages > 1 ? "warn" : "good"}`;
-    el.textContent = pages > 1 ? `${pages} pages: hide or trim some bullets` : `Fits on 1 page (${size}pt)`;
+    el.textContent = pages > 1 ? `${pages} pages: hide or trim some bullets` : scale < 1 ? `Fits on 1 page (text at ${Math.round(scale * 100)}%)` : "Fits on 1 page";
   } catch (e) {
     el.textContent = "";
   }
@@ -1312,6 +1313,22 @@ function sectionCard(r, s, si) {
   );
 
   if (s.kind === "entries") {
+    // How this section is typeset (filled in from the uploaded resume).
+    const look = L.sectionLayout(s);
+    const pick = (key, options) =>
+      h(
+        "select",
+        { onchange: (ev) => structural(() => (s[key] = ev.target.value))() },
+        options.map(([v, t]) => h("option", { value: v, selected: look[key] === v }, t))
+      );
+    card.append(
+      h(
+        "details",
+        { class: "small", style: { margin: "4px 0 8px" } },
+        h("summary", {}, "Layout"),
+        h("div", { class: "stack", style: { marginTop: "6px" } }, pick("layout", L.LAYOUTS), look.layout === "heading" ? [pick("order", L.ORDERS), pick("datesOn", L.DATES_ON)] : null)
+      )
+    );
     s.entries.forEach((e, ei) => {
       const entry = h(
         "div",
@@ -1327,6 +1344,7 @@ function sectionCard(r, s, si) {
         ),
         h("div", { class: "grid2" }, input(e, "subtitle", "Role / degree"), input(e, "dates", "Dates (e.g. May 2025 – Aug 2025)")),
         h("div", { style: { margin: "6px 0" } }, input(e, "location", "Location (optional)")),
+        look.layout !== "row" ? h("div", { class: "grid2", style: { marginBottom: "6px" } }, input(e, "linkLabel", "Link text (e.g. GitHub)"), input(e, "url", "Link URL (optional)")) : null,
         e.bullets.map((b, bi) =>
           h(
             "div",
@@ -1334,6 +1352,7 @@ function sectionCard(r, s, si) {
             h("span", { class: "dot" }, "•"),
             textarea({
               value: b.text,
+              title: "Wrap text in **double asterisks** to make it bold",
               oninput: (ev) => {
                 b.text = ev.target.value;
                 saveEditing();

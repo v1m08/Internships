@@ -19,7 +19,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const BRIDGE_VERSION = "1.2.0";
+const BRIDGE_VERSION = "1.3.0";
 const TIMEOUT_MS = 5 * 60 * 1000;
 
 function loadConfig() {
@@ -193,14 +193,20 @@ async function compileLatex(tex) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jobpilot-tex-"));
   try {
     fs.writeFileSync(path.join(dir, "resume.tex"), tex);
-    const args = engine.name === "tectonic" ? ["resume.tex"] : ["-interaction=nonstopmode", "-halt-on-error", "resume.tex"];
+    const args = engine.name === "tectonic" ? ["--keep-logs", "resume.tex"] : ["-interaction=nonstopmode", "-halt-on-error", "resume.tex"];
     const r = await runProcess(engine.path, args, dir);
     const pdf = path.join(dir, "resume.pdf");
     if (!fs.existsSync(pdf)) {
       const errLine = (r.out.split(/\r?\n/).find((l) => l.startsWith("!") || /error/i.test(l)) || "").trim();
       return { ok: false, code: "COMPILE_FAILED", error: `LaTeX failed (${engine.name}): ${errLine || "see log"}`, log: r.out.slice(-3000) };
     }
-    return { ok: true, engine: engine.name, pdfBase64: fs.readFileSync(pdf).toString("base64") };
+    // Page count, so the extension can shrink the resume to fit one page.
+    let log = r.out;
+    try {
+      log += fs.readFileSync(path.join(dir, "resume.log"), "utf8");
+    } catch {}
+    const m = log.match(/Output written on \S+ \((\d+) pages?/);
+    return { ok: true, engine: engine.name, pages: m ? Number(m[1]) : null, pdfBase64: fs.readFileSync(pdf).toString("base64") };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

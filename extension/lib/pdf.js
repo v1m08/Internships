@@ -1,15 +1,15 @@
-// Built-in PDF renderer that reproduces Jake's Resume (LaTeX) layout with
-// jsPDF and Computer Modern (CMU Serif) fonts. Used when no LaTeX engine is
-// available through the Claude Code bridge (see render.js). Geometry follows
-// the template: 0.5in margins, 11pt body, \small (10pt) details, small-caps
-// \large section titles with a rule, 0.15in list indent.
+// Built-in PDF renderer for Jake's Resume style, with jsPDF and Computer
+// Modern (CMU Serif) fonts. Used when no LaTeX engine is available through
+// the Claude Code bridge (see render.js). Positions come from layout.js, the
+// same numbers latex.js uses, so both renderers fit the same content on a page.
+import { METRICS as M, entryLines, richRuns, contactItems, sectionLayout, plain } from "./layout.js";
 
-const PAGE_W = 612; // US Letter, points
-const PAGE_H = 792;
-const MARGIN = 36; // 0.5in
-const TEXT_W = PAGE_W - 2 * MARGIN; // 540pt
-const LIST_X = MARGIN + 10.8; // leftmargin=0.15in
-const ROW_R = LIST_X + 0.97 * TEXT_W; // tabular* {0.97\textwidth}
+const PAGE_W = M.page.w;
+const PAGE_H = M.page.h;
+const SIDE = M.page.side;
+const TEXT_R = PAGE_W - SIDE; // right edge of the text block
+const LIST_X = SIDE + M.indent;
+const ROW_R = LIST_X + M.rowWidth * (PAGE_W - 2 * SIDE);
 
 const FONT_FILES = { normal: "cmu-serif-regular.ttf", bold: "cmu-serif-bold.ttf", italic: "cmu-serif-italic.ttf" };
 let fontData = null; // { normal: base64, ... } once loaded
@@ -49,95 +49,122 @@ function newDoc() {
 }
 
 // CM fonts lack some glyphs; normalize to ones they have.
-function clean(s) {
-  return String(s ?? "")
+function clean(s, keepEdges = false) {
+  const out = String(s ?? "")
     .replace(/[‘’]/g, "'")
     .replace(/[“”]/g, '"')
     .replace(/→/g, "->")
     .replace(/[^\x20-\x7e -ſ–—•…]/gu, "")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/\s+/g, " ");
+  return keepEdges ? out : out.trim();
 }
 
-const displayUrl = (u) => String(u || "").replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "");
 const visible = (arr) => (arr || []).filter((x) => !x.hidden);
-
-function sectionStyle(title) {
-  const t = (title || "").toLowerCase();
-  if (/project/.test(t)) return "project";
-  if (/experience|employment|work|leadership|activities|involvement|research/.test(t)) return "experience";
-  return "education";
-}
 
 function layout(resume, k) {
   const { doc, family } = newDoc();
-  const pt = (n) => n * k; // scaled size
-  let y = MARGIN;
+  const S = M.size;
+  const G = M.gap;
+  const pt = (n) => n * k;
+  const bottomY = PAGE_H - M.page.bottom;
+  let y = M.page.top;
   let pages = 1;
 
   const font = (style, size) => {
-    doc.setFont(family, style);
+    doc.setFont(family, style === "bolditalic" ? "bold" : style);
     doc.setFontSize(size);
   };
   const width = (t) => doc.getTextWidth(t);
-  const ensure = (h) => {
-    if (y + h > PAGE_H - MARGIN) {
+  // Move down to the next baseline, starting a new page when needed.
+  const down = (g) => {
+    y += pt(g);
+    if (y > bottomY) {
       doc.addPage();
       pages++;
-      y = MARGIN;
+      y = M.page.top + pt(G.bullet);
     }
   };
 
   // \scshape: capitals at full size, lowercase as smaller capitals.
-  const smallCaps = (text, size, style) => {
-    const parts = [];
-    for (const m of text.matchAll(/([^a-z]+)|([a-z]+)/g)) parts.push(m[1] ? { t: m[1], s: size } : { t: m[2].toUpperCase(), s: size * 0.8 });
-    let w = 0;
-    for (const p of parts) {
-      font(style, p.s);
-      w += width(p.t);
+  const smallCaps = (text, size) => {
+    let x = SIDE;
+    for (const m of text.matchAll(/([^a-z]+)|([a-z]+)/g)) {
+      const t = m[1] || m[2].toUpperCase();
+      font("normal", m[1] ? size : size * 0.8);
+      doc.text(t, x, y);
+      x += width(t);
     }
-    return { parts, w, draw: (x, by) => parts.reduce((cx, p) => (font(style, p.s), doc.text(p.t, cx, by), cx + width(p.t)), x) };
   };
 
-  const wrapWords = (text, firstW, restW) => {
-    const words = text.split(" ").filter(Boolean);
-    const lines = [];
-    let line = "";
-    let w = firstW;
-    for (const word of words) {
-      const test = line ? `${line} ${word}` : word;
-      if (width(test) > w && line) {
-        lines.push(line);
-        line = word;
-        w = restW;
-      } else line = test;
+  // Styled runs -> words, so lines can wrap mid-run. `space` = a space before it.
+  const words = (runs) => {
+    const out = [];
+    let space = false;
+    for (const r of runs) {
+      for (const tok of clean(r.t, true).split(/(\s+)/)) {
+        if (!tok) continue;
+        if (/^\s/.test(tok)) space = true;
+        else {
+          out.push({ t: tok, r, space });
+          space = false;
+        }
+      }
     }
-    if (line) lines.push(line);
-    return lines;
+    return out;
+  };
+  const wordW = (w, size) => (font(w.r.style, size), width(w.t));
+  const spaceW = (size) => (font("normal", size), width(" "));
+
+  // Draw runs from x, wrapping at maxX; later lines start at x too.
+  const drawRuns = (runs, x, maxX, size, lineGap = G.bullet) => {
+    let cx = x;
+    let lineStart = true;
+    for (const w of words(runs)) {
+      const ww = wordW(w, size);
+      const sp = lineStart ? 0 : w.space ? spaceW(size) : 0;
+      if (!lineStart && cx + sp + ww > maxX) {
+        down(lineGap);
+        cx = x;
+      } else cx += sp;
+      font(w.r.style, size);
+      doc.text(w.t, cx, y);
+      if (w.r.u) {
+        doc.setLineWidth(0.4);
+        doc.line(cx, y + pt(1.6), cx + ww, y + pt(1.6));
+      }
+      if (w.r.url) doc.link(cx, y - size * 0.8, ww, size, { url: w.r.url });
+      cx += ww;
+      lineStart = false;
+    }
+  };
+  const runsWidth = (runs, size) => words(runs).reduce((a, w, i) => a + wordW(w, size) + (i && w.space ? spaceW(size) : 0), 0);
+
+  const row = (left, right, ls, rs) => {
+    const rw = right.length ? runsWidth(right, rs) : 0;
+    if (rw) drawRuns(right, ROW_R - rw, ROW_R + 1, rs);
+    drawRuns(left, LIST_X, rw ? ROW_R - rw - 8 : ROW_R, ls);
   };
 
   // ---- Header
   const b = resume.basics || {};
+  let started = false;
   if (b.name) {
-    // \textbf{\Huge \scshape ...}: CM has no bold small caps, so LaTeX shows plain bold.
-    font("bold", pt(24.88));
-    y += pt(24.88) * 0.72;
+    y += pt(27.2);
+    font("bold", pt(S.name));
     doc.text(clean(b.name), PAGE_W / 2, y, { align: "center" });
+    started = true;
   }
-  const contact = [];
-  if (b.phone) contact.push({ t: clean(b.phone) });
-  if (b.email) contact.push({ t: clean(b.email), url: `mailto:${b.email}`, u: true });
-  if (b.location) contact.push({ t: clean(b.location) });
-  for (const l of b.links || []) if (l.url) contact.push({ t: clean(displayUrl(l.url)), url: /^https?:/.test(l.url) ? l.url : `https://${l.url}`, u: true });
+  const contact = contactItems(b).map((c) => ({ ...c, t: clean(c.t) }));
   if (contact.length) {
-    font("normal", pt(10));
+    if (started) down(G.nameToContact);
+    else y += pt(27.2);
+    font("normal", pt(S.contact));
     const sep = " | ";
     const rows = [[]];
     let rw = 0;
     for (const c of contact) {
       const w = width(c.t) + (rows[rows.length - 1].length ? width(sep) : 0);
-      if (rw + w > TEXT_W && rows[rows.length - 1].length) {
+      if (rw + w > TEXT_R - SIDE && rows[rows.length - 1].length) {
         rows.push([c]);
         rw = width(c.t);
       } else {
@@ -145,83 +172,58 @@ function layout(resume, k) {
         rw += w;
       }
     }
-    for (const row of rows) {
-      y += pt(12.5);
-      const total = row.reduce((a, c, i) => a + width(c.t) + (i ? width(sep) : 0), 0);
+    rows.forEach((items, ri) => {
+      if (ri) down(G.bullet);
+      const total = items.reduce((a, c, i) => a + width(c.t) + (i ? width(sep) : 0), 0);
       let x = (PAGE_W - total) / 2;
-      row.forEach((c, i) => {
+      items.forEach((c, i) => {
         if (i) {
           doc.text(sep, x, y);
           x += width(sep);
         }
         const w = width(c.t);
         doc.text(c.t, x, y);
-        if (c.u) {
+        if (c.url) {
           doc.setLineWidth(0.4);
           doc.line(x, y + pt(1.6), x + w, y + pt(1.6));
+          doc.link(x, y - pt(7), w, pt(9), { url: c.url });
         }
-        if (c.url) doc.link(x, y - pt(8), w, pt(10), { url: c.url });
         x += w;
       });
-    }
+    });
   }
-  y += pt(8);
 
-  // ---- Sections
+  let prev = "contact";
   const section = (title) => {
-    ensure(pt(40));
-    y += pt(22);
-    const sc = smallCaps(clean(title), pt(12), "normal");
-    sc.draw(MARGIN, y);
+    down(prev === "contact" ? G.contactToSection : prev === "line" ? G.linesToSection : G.toSection);
+    smallCaps(clean(title), pt(S.section));
     doc.setLineWidth(0.4);
-    doc.line(MARGIN, y + pt(3.2), PAGE_W - MARGIN, y + pt(3.2));
-    y += pt(3);
-  };
-
-  const row = (left, right, size, leftStyle, rightStyle) => {
-    if (Array.isArray(left)) {
-      let x = LIST_X;
-      for (const [t, st] of left) {
-        font(st, size);
-        doc.text(t, x, y);
-        x += width(t);
-      }
-    } else {
-      font(leftStyle, size);
-      doc.text(left, LIST_X, y);
-    }
-    if (right) {
-      font(rightStyle, size === pt(10) && rightStyle === "normal" ? pt(11) : size);
-      doc.text(right, ROW_R, y, { align: "right" });
-    }
+    doc.line(SIDE, y + pt(G.ruleBelowTitle) - 0.2, TEXT_R, y + pt(G.ruleBelowTitle) - 0.2);
+    prev = "title";
   };
 
   const bulletList = (bullets) => {
     const items = visible(bullets).filter((x) => (x.text || "").trim());
-    if (!items.length) return;
-    const textX = LIST_X + pt(24.2);
-    font("normal", pt(10));
-    y += pt(0.5);
-    for (const it of items) {
-      const lines = doc.splitTextToSize(clean(it.text), PAGE_W - MARGIN - textX);
-      lines.forEach((line, i) => {
-        ensure(pt(12));
-        y += pt(i === 0 ? 14 : 12);
-        if (i === 0) doc.circle(textX - pt(8.6), y - pt(3.1), pt(1.15), "F");
-        doc.text(line, textX, y);
-      });
-    }
-    y += pt(2);
+    items.forEach((it, i) => {
+      down(i === 0 ? G.headingToBullet : G.bullet);
+      doc.circle(SIDE + M.bulletX + pt(1.2), y - pt(3.1), pt(1.15), "F");
+      drawRuns(richRuns(it.text), SIDE + M.bulletTextX, TEXT_R, pt(S.bullet));
+    });
+    if (items.length) prev = "bullet";
+  };
+
+  const textLines = (items) => {
+    items.forEach((l, i) => {
+      down(i === 0 ? G.sectionToLines : G.line);
+      const runs = l.label ? [{ t: l.label, style: "bold" }, { t: ": ", style: "normal" }, ...richRuns(l.text)] : richRuns(l.text);
+      drawRuns(runs, LIST_X, TEXT_R, pt(S.line), G.line);
+    });
+    prev = "line";
   };
 
   if ((resume.summary || "").trim()) {
     section("Summary");
-    font("normal", pt(10));
-    for (const line of doc.splitTextToSize(clean(resume.summary), ROW_R - LIST_X)) {
-      ensure(pt(12));
-      y += pt(12);
-      doc.text(line, LIST_X, y);
-    }
+    textLines([{ label: "", text: resume.summary }]);
   }
 
   for (const s of resume.sections || []) {
@@ -230,66 +232,40 @@ function layout(resume, k) {
     const has = s.kind === "entries" ? entries.length : s.kind === "lines" ? lines.length : (s.text || "").trim();
     if (!has) continue;
     section(s.title || "");
-    const style = sectionStyle(s.title);
 
     if (s.kind === "entries") {
-      entries.forEach((e, i) => {
-        ensure(pt(28));
-        y += pt(i === 0 ? 12.5 : 17);
-        if (style === "project") {
-          const left = [[clean(e.title), "bold"]];
-          if (e.subtitle) left.push([" | ", "normal"], [clean(e.subtitle), "italic"]);
-          row(left, clean(e.dates), pt(10), null, "normal");
-        } else {
-          const exp = style === "experience";
-          const top = exp ? clean(e.subtitle || e.title) : clean(e.title);
-          const topR = exp ? clean(e.dates) : clean(e.location);
-          const bot = exp ? (e.subtitle ? clean(e.title) : "") : clean(e.subtitle);
-          const botR = exp ? clean(e.location) : clean(e.dates);
-          row(top, topR, pt(11), "bold", "normal");
-          if (bot || botR) {
-            y += pt(14);
-            row(bot, botR, pt(10), "italic", "italic");
-          }
+      const { layout: look } = sectionLayout(s);
+      for (const e of entries) {
+        for (const line of entryLines(s, e)) {
+          if (line.kind === "bottom") down(G.topToBottom);
+          else if (prev === "title") down(look === "inline" ? G.sectionToInline : look === "row" ? G.sectionToRow : G.sectionToHeading);
+          else if (prev === "row") down(G.afterRowToRow);
+          else down(look === "inline" ? G.afterBulletsToInline : G.afterBulletsToHeading);
+          const ls = { top: S.top, bottom: S.bottom, inline: S.inline, row: S.row }[line.kind];
+          const rs = { top: S.topRight, bottom: S.bottom, inline: S.inlineRight, row: S.row }[line.kind];
+          row(line.left, line.right, pt(ls), pt(rs));
+          prev = line.kind === "row" ? "row" : "heading";
         }
         bulletList(e.bullets);
-      });
-    } else {
-      const items = s.kind === "lines" ? lines : [{ label: "", text: s.text }];
-      y += pt(1.5);
-      for (const l of items) {
-        const label = l.label ? clean(l.label) : "";
-        font("bold", pt(10));
-        const labelW = label ? width(label) : 0;
-        font("normal", pt(10));
-        const text = `${label ? ": " : ""}${clean(l.text)}`;
-        const wrapped = wrapWords(text, ROW_R - LIST_X - labelW, ROW_R - LIST_X);
-        wrapped.forEach((line, i) => {
-          ensure(pt(12));
-          y += pt(12);
-          if (i === 0 && label) {
-            font("bold", pt(10));
-            doc.text(label, LIST_X, y);
-            font("normal", pt(10));
-            doc.text(line, LIST_X + labelW, y);
-          } else doc.text(line, LIST_X, y);
-        });
       }
-    }
+    } else textLines(s.kind === "lines" ? lines : [{ label: "", text: s.text }]);
   }
   return { doc, pages };
 }
 
 const MIN_SCALE = 0.85;
 const STEP = 0.025;
+// Tailoring hides bullets rather than shrink text below this.
+export const TAILOR_MIN_SCALE = 0.925;
 
 // Largest scale (≤ 100% of the template's sizes, in 2.5% steps) that fits on
-// one page: full size first (the usual case), then a binary search.
+// one page: full size first (the usual case), then a binary search. latex.js
+// takes the same scale.
 export function renderResume(resume) {
   const full = layout(resume, 1);
-  if (full.pages === 1) return { ...full, size: 11 };
+  if (full.pages === 1) return { ...full, scale: 1 };
   const smallest = layout(resume, MIN_SCALE);
-  if (smallest.pages > 1) return { ...smallest, size: Math.round(11 * MIN_SCALE * 10) / 10 };
+  if (smallest.pages > 1) return { ...smallest, scale: MIN_SCALE };
   let lo = 0; // steps above MIN_SCALE known to fit
   let hi = Math.round((1 - MIN_SCALE) / STEP); // known not to fit
   let best = smallest;
@@ -301,12 +277,15 @@ export function renderResume(resume) {
       best = r;
     } else hi = mid;
   }
-  return { ...best, size: Math.round(11 * (MIN_SCALE + lo * STEP) * 10) / 10 };
+  return { ...best, scale: Math.round((MIN_SCALE + lo * STEP) * 1000) / 1000 };
 }
 
-// Cheap check used while tailoring: does it fit at the smallest allowed size?
-export function fitsOnePage(resume) {
-  return layout(resume, MIN_SCALE).pages === 1;
+export const MIN_FIT_SCALE = MIN_SCALE;
+export const FIT_STEP = STEP;
+
+// Used while tailoring: does it fit without shrinking text below `scale`?
+export function fitsOnePage(resume, scale = TAILOR_MIN_SCALE) {
+  return layout(resume, scale).pages === 1;
 }
 
 export function resumeToBase64(resume) {
@@ -331,10 +310,10 @@ export function resumeToText(resume) {
     if (s.kind === "entries") {
       for (const e of s.entries.filter((x) => !x.hidden)) {
         out.push([e.title, e.subtitle, e.location, e.dates].filter(Boolean).join(" — "));
-        for (const bl of e.bullets.filter((x) => !x.hidden)) out.push(`• ${bl.text}`);
+        for (const bl of e.bullets.filter((x) => !x.hidden)) out.push(`• ${plain(bl.text)}`);
       }
     } else if (s.kind === "lines") {
-      for (const l of s.lines.filter((x) => !x.hidden)) out.push(l.label ? `${l.label}: ${l.text}` : l.text);
+      for (const l of s.lines.filter((x) => !x.hidden)) out.push(l.label ? `${l.label}: ${plain(l.text)}` : plain(l.text));
     } else out.push(s.text);
   }
   return out.filter((x) => x !== undefined).join("\n");

@@ -12,7 +12,10 @@ Downloads go to `Downloads/Resumes/` and overwrite files with the same name, so 
 
 ## Resume format: Jake's Resume
 
-Every PDF uses [Jake's Resume](https://github.com/jakegut/resume) LaTeX template (MIT). `extension/lib/latex.js` turns the resume JSON into `.tex` deterministically: the same JSON always gives the same file.
+Every PDF uses the style of [Jake's Resume](https://github.com/jakegut/resume) LaTeX template (MIT). `extension/lib/latex.js` turns the resume JSON into `.tex` deterministically: the same JSON always gives the same file.
+
+- **Keeps your resume's layout.** When Claude reads your PDF it also records how each section is laid out: organization or role on top, dates on the first or second line, one-line project headings with a GitHub link, single-line award rows, bold labels inside bullets, and the order of your contact line. You can change any of it under **Layout** on each section in the Resume tab. Resumes uploaded before this existed: click **Re-parse**.
+- **Always one page.** If a tailored resume runs long, every font size and gap shrinks together (down to 85%) until it fits. Tailoring hides the least relevant bullets before it lets text get smaller than about 92%.
 
 - **Exact LaTeX output:** if you use the Claude Code bridge and have a TeX engine installed (MacTeX on Mac, MiKTeX on Windows, TeX Live, or Tectonic), JobPilot compiles the `.tex` on your computer with `pdflatex`. Run `brew install --cask mactex-no-gui`, or `brew install tectonic` for something smaller.
 - **No LaTeX installed:** JobPilot draws the same layout itself in Computer Modern (the LaTeX font), so it looks nearly identical.
