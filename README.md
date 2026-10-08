@@ -129,6 +129,10 @@ Hover a badge to see why and the exact sentence. Where it looks:
 
 **Jobs → Filters → Hide jobs I can't apply to** removes ✕ jobs from the list (on by default), and Autopilot checks each job again from its posting and skips it as *Not eligible* without filling anything. The keyword rules ignore equal-opportunity boilerplate ("without regard to … citizenship status") and handle negation ("we sponsor" vs "we do not sponsor").
 
+## Saving jobs for later
+
+Click **☆** on any job in the list (or **Save for later** on the Apply tab, for a job on any site, or on an Autopilot job) to keep it in **Jobs → ★ Saved** with a note, e.g. "needs a take-home project first". Autopilot skips saved jobs, since you've set them aside to do yourself.
+
 ## Daily flow
 
 **Jobs** tab → click a job → **Apply** tab → **Tailor** → **Autofill this page** (click the site's *Apply* button first if the form is on another page) → **Draft answers** → review → Submit on the site → **Mark as applied**.

@@ -237,3 +237,6 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 a { color: var(--accent); }
 details summary { cursor: pointer; font-weight: 600; }
 hr { border: 0; border-top: 1px solid var(--border); margin: 10px 0; }
+/* Saved-for-later star */
+.btn.starred { color: #d4a017; }
+.job > .btn.small { padding: 2px 6px; font-size: 15px; line-height: 1; align-self: center; }

@@ -32,6 +32,8 @@ const S = {
   eligSignals: {}, // jobId -> signals (fresh entries of eligStore)
   eligPage: {}, // jobKey -> signals read from the open posting
   fb: {}, // open feedback boxes: key -> { open, text, remember }
+  saved: {}, // jobKey -> { key, company, title, url, locations, note, savedAt }: jobs you saved for later
+  showSaved: false, // Jobs tab: show your saved jobs instead of the list
   fixResult: null, // last "fix with my feedback" result on the Apply tab
   jobsCache: { fetchedAt: 0, items: [] },
   tab: null,
@@ -341,9 +343,12 @@ function renderApply() {
     h(
       "div",
       { class: "card" },
-      h("div", { class: "row" }, h("strong", { style: { fontSize: "14px" } }, company || "This page"), h("span", { class: "spacer" }), applied && h("span", { class: "pill good" }, "Applied")),
+      h("div", { class: "row" }, h("strong", { style: { fontSize: "14px" } }, company || "This page"), h("span", { class: "spacer" }), applied && h("span", { class: "pill good" }, "Applied"), starButton({ ...S.job, company: company || S.job.company, title: role || S.job.title || S.tab.title }, renderApply, true)),
       h("div", {}, role || S.tab.title || ""),
       h("div", { class: "muted small" }, host),
+      S.saved[S.job.key]
+        ? textarea({ rows: 1, value: S.saved[S.job.key].note, placeholder: "Note for later (e.g. needs a take-home project first)", style: { marginTop: "6px" }, oninput: (e) => ((S.saved[S.job.key].note = e.target.value), saveSaved()) })
+        : null,
       eligNotice()
     )
   );
@@ -848,7 +853,19 @@ function renderJobs() {
   );
 
   const appliedCount = Object.keys(S.applied).length;
+  const savedCount = Object.keys(S.saved).length;
+  const viewSwitch = h(
+    "div",
+    { class: "row", style: { marginBottom: "8px" } },
+    h("button", { class: `btn small${S.showSaved ? " ghost" : " primary"}`, onclick: () => ((S.showSaved = false), renderJobs()) }, "All jobs"),
+    h("button", { class: `btn small${S.showSaved ? " primary" : " ghost"}`, onclick: () => ((S.showSaved = true), renderJobs()) }, `★ Saved (${savedCount})`)
+  );
+  if (S.showSaved) {
+    el.replaceChildren(viewSwitch, savedList());
+    return;
+  }
   el.replaceChildren(
+    viewSwitch,
     autopilotCard(),
     h(
       "div",
@@ -868,6 +885,87 @@ function renderJobs() {
     listWrap
   );
   update();
+}
+
+// ------------------------------------------------------- saved jobs
+
+let savingSaved = false;
+const saveSaved = debounce(async () => {
+  savingSaved = true;
+  await store.set("saved", S.saved);
+  savingSaved = false;
+}, 300);
+
+function toggleSaved(job) {
+  if (S.saved[job.key]) delete S.saved[job.key];
+  else S.saved[job.key] = { key: job.key, company: job.company || "", title: job.title || "", url: job.url, locations: job.locations || [], note: "", savedAt: Date.now() };
+  saveSaved();
+}
+
+// ☆ / ★ toggle. rerender() redraws whatever it's on.
+function starButton(job, rerender, withLabel = false) {
+  const on = !!S.saved[job.key];
+  return h(
+    "button",
+    {
+      class: `btn ghost small${on ? " starred" : ""}`,
+      title: on ? "Saved for later (click to unsave)" : "Save for later",
+      onclick: (e) => {
+        e.stopPropagation();
+        toggleSaved(job);
+        toast(S.saved[job.key] ? "Saved for later (Jobs → Saved)" : "Removed from saved");
+        rerender();
+      },
+    },
+    on ? "★" : "☆",
+    withLabel ? (on ? " Saved" : " Save for later") : null
+  );
+}
+
+// Jobs tab → Saved: everything you've set aside, with your notes.
+function savedList() {
+  const items = Object.values(S.saved).sort((a, b) => b.savedAt - a.savedAt);
+  if (!items.length) return h("p", { class: "muted" }, "Nothing saved yet. Click ☆ on a job (or Save for later on the Apply tab) to keep it here, e.g. ones with a project to do first.");
+  return h(
+    "div",
+    { class: "stack" },
+    items.map((j) =>
+      h(
+        "div",
+        { class: "card" },
+        h(
+          "div",
+          { class: "row" },
+          h("strong", {}, j.company || "Saved job"),
+          h("span", { class: "spacer" }),
+          S.applied[j.key] ? h("span", { class: "pill good" }, "Applied") : null,
+          h("span", { class: "small muted" }, `saved ${timeAgo(j.savedAt)}`)
+        ),
+        h("div", {}, j.title || j.url),
+        j.locations?.length ? h("div", { class: "small muted" }, j.locations.join(" · ")) : null,
+        textarea({ rows: 1, value: j.note, placeholder: "Note (e.g. take-home project due Friday, ask about referral)", style: { marginTop: "6px" }, oninput: (e) => ((j.note = e.target.value), saveSaved()) }),
+        h(
+          "div",
+          { class: "row", style: { marginTop: "6px" } },
+          h("button", { class: "btn small", onclick: () => openJob(j) }, "Open"),
+          !S.applied[j.key] &&
+            h(
+              "button",
+              {
+                class: "btn ghost small",
+                onclick: () => {
+                  S.applied[j.key] = { company: j.company, title: j.title, url: j.url, date: Date.now() };
+                  store.set("applied", S.applied);
+                  renderJobs();
+                },
+              },
+              "I applied"
+            ),
+          h("button", { class: "btn ghost small", onclick: () => (toggleSaved(j), renderJobs()) }, "Unsave")
+        )
+      )
+    )
+  );
 }
 
 // ---------------------------------------------------- can you apply?
@@ -932,6 +1030,7 @@ function renderJobList(wrap, filtered) {
     return h(
       "div",
       { class: `job${applied ? " applied" : ""}`, onclick: () => openJob(j), title: `${j.url}\n${(j.sources || []).join(", ")}` },
+      starButton(j, () => renderJobList(wrap, filtered)),
       h("div", { class: "meta" }, h("div", { class: "company" }, j.company), h("div", { class: "title" }, j.title), h("div", { class: "loc" }, j.locations.join(" · "))),
       h("div", { style: { textAlign: "right" } }, h("div", { class: "small muted" }, Jobs.ageLabel(j.posted)), applied ? h("span", { class: "pill good" }, "Applied") : tailored ? h("span", { class: "pill" }, "Tailored") : elig)
     );
@@ -1111,6 +1210,7 @@ function queueRow(it) {
             ),
           h("button", { class: "btn ghost small", onclick: open }, it.tabId ? "Go to tab" : "Open"),
           !["failed", "ineligible"].includes(it.status) && h("button", { class: "btn ghost small", onclick: markApplied }, "I submitted it"),
+          starButton(it.job, renderJobs, true),
           h(
             "button",
             {
@@ -1168,7 +1268,7 @@ async function startAutopilot(n) {
   }
   const inQueue = new Set(S.queue.map((i) => i.job.key));
   const picks = filteredJobs()
-    .filter((j) => !S.applied[j.key] && !inQueue.has(j.key))
+    .filter((j) => !S.applied[j.key] && !inQueue.has(j.key) && !S.saved[j.key]) // saved = you'll do it yourself
     .slice(0, n)
     .map((j) => ({ id: j.key, job: jobFromListing(j), status: "queued", note: "" }));
   S.queue.push(...picks);
@@ -2438,7 +2538,7 @@ function renderUpdateBanner(status) {
 async function init() {
   // The 5k-job cache is big: show the panel first, load it right after.
   const jobsPromise = Jobs.getJobs();
-  const [settings, profile, base, resumePdf, tailored, applied, cover, bank, eligStore] = await Promise.all([
+  const [settings, profile, base, resumePdf, tailored, applied, cover, bank, eligStore, saved] = await Promise.all([
     store.getSettings(),
     store.getProfile(),
     store.get("resume", null),
@@ -2448,8 +2548,9 @@ async function init() {
     store.get("coverLetter", null),
     store.get("answerBank", null),
     store.get("eligCache", {}),
+    store.get("saved", {}),
   ]).then((r) => ((r[6] = { ...C.DEFAULT_COVER, ...(r[6] || {}) }), (r[7] = r[7] || C.DEFAULT_BANK.map((b) => ({ ...b }))), r));
-  Object.assign(S, { settings, profile, base, resumePdf, tailored, applied, cover, bank });
+  Object.assign(S, { settings, profile, base, resumePdf, tailored, applied, cover, bank, saved });
   // Simplify eligibility data younger than a week.
   for (const [id, e] of Object.entries(eligStore || {})) if (Date.now() - e.at < ELIG_TTL) (S.eligStore[id] = e), (S.eligSignals[id] = e.signals);
   jobsPromise.then((jobsCache) => {
@@ -2508,6 +2609,7 @@ async function init() {
       if (S.activeTab === "jobs") renderJobs();
     }
     if (changes.applied && !S.autopilotRunning) S.applied = changes.applied.newValue || {};
+    if (changes.saved && !savingSaved) S.saved = changes.saved.newValue || {};
   });
 }
 
