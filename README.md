@@ -101,6 +101,22 @@ Settings → Autopilot: auto-submit on/off, jobs at once, a randomized pause bet
 - "Save for next time" on an AI answer reuses it for the same question on later applications, with no AI call.
 - Default model is Sonnet, which is fast. Pick Opus in Settings for the best writing.
 
+## Can you apply? (work authorization)
+
+Set **Settings → Application profile → U.S. work status** (citizen, permanent resident, other authorization, student visa with CPT/OPT, or not authorized) and whether you hold a security clearance. JobPilot then marks every job:
+
+- **✕ Can't apply**: something rules you out, e.g. U.S. citizenship or a clearance required, "must be authorized to work for any employer" (CPT/OPT doesn't count), "without sponsorship now or in the future", or no visa sponsorship when you need it.
+- **? Check**: unclear or softer signals (e.g. the company usually doesn't sponsor H-1B).
+- **✓ Can apply**: checked and nothing ruled you out.
+
+Hover a badge to see why and the exact sentence. Where it looks:
+
+- **Repo listings**: the 🛂 / 🇺🇸 flags and Simplify's sponsorship field (sparse: most listings say "Other").
+- **Simplify's job pages**: for Simplify-sourced listings, JobPilot reads the page's data: H-1B sponsorship for the role and the company, and the posting's requirement sentences. Fetched a few at a time for the jobs you're looking at and cached for a week.
+- **The posting itself**: on any job site, the Apply tab reads the page and shows the verdict under the job title.
+
+**Jobs → Filters → Hide jobs I can't apply to** removes ✕ jobs from the list (on by default), and Autopilot checks each job again from its posting and skips it as *Not eligible* without filling anything. The keyword rules ignore equal-opportunity boilerplate ("without regard to … citizenship status") and handle negation ("we sponsor" vs "we do not sponsor").
+
 ## Daily flow
 
 **Jobs** tab → click a job → **Apply** tab → **Tailor** → **Autofill this page** (click the site's *Apply* button first if the form is on another page) → **Draft answers** → review → Submit on the site → **Mark as applied**.

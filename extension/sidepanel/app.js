@@ -10,6 +10,7 @@ import * as L from "../lib/layout.js";
 import * as G from "../lib/grad.js";
 import { resolveStuck } from "../lib/resolve.js";
 import * as C from "../lib/cover.js";
+import * as E from "../lib/eligibility.js";
 import * as Sources from "../lib/sources.js";
 import * as Autopilot from "../lib/autopilot.js";
 import * as Ans from "../lib/answers.js";
@@ -27,6 +28,9 @@ const S = {
   applied: {}, // jobKey -> { company, title, url, date }
   cover: null, // your cover letter template (lib/cover.js)
   bank: [], // your answer bank (lib/cover.js DEFAULT_BANK)
+  eligStore: {}, // jobId -> { signals, at }: Simplify job data, cached a week
+  eligSignals: {}, // jobId -> signals (fresh entries of eligStore)
+  eligPage: {}, // jobKey -> signals read from the open posting
   jobsCache: { fetchedAt: 0, items: [] },
   tab: null,
   job: null, // { key, company, title, url, listingId? }
@@ -182,6 +186,31 @@ async function refreshContext() {
   }
   S.job = job;
   if (S.activeTab === "apply") renderApply();
+  // Can you apply? Read the posting on this page (and Simplify's data).
+  if (job && !S.eligPage[job.key]) {
+    const listing = S.jobsByKey.get(job.key);
+    if (listing) enrichEligibility([listing]);
+    Page.readJobPosting(tab)
+      .then((p) => {
+        S.eligPage[job.key] = E.signalsFromText(p.text);
+        if (S.job?.key === job.key && S.activeTab === "apply") renderApply();
+      })
+      .catch(() => {});
+  }
+}
+
+// Can-you-apply box under the job title on the Apply tab.
+function eligNotice() {
+  const listing = S.jobsByKey.get(S.job.key);
+  const read = S.eligPage[S.job.key] !== undefined;
+  const v = E.verdict(signalsForJob(listing, S.job.key), S.profile);
+  if (v.level === "yes") return read ? h("div", { class: "small", style: { marginTop: "6px", color: "var(--good)" } }, "✓ Can apply: no work-authorization restrictions found on this page" + (listing && S.eligSignals[listing.id] ? " or in Simplify's data" : "")) : null;
+  return h(
+    "div",
+    { class: `notice ${v.level === "no" ? "bad" : "warn"}`, style: { marginTop: "8px" } },
+    h("strong", {}, v.level === "no" ? "✕ You can't apply to this one" : "? Check before applying"),
+    h("ul", { class: "report-list", style: { margin: "4px 0 0" } }, v.reasons.slice(0, 3).map((r) => h("li", {}, r.text, h("div", { class: "muted small" }, `"${r.evidence}"`))))
+  );
 }
 
 function currentTailored() {
@@ -312,7 +341,8 @@ function renderApply() {
       { class: "card" },
       h("div", { class: "row" }, h("strong", { style: { fontSize: "14px" } }, company || "This page"), h("span", { class: "spacer" }), applied && h("span", { class: "pill good" }, "Applied")),
       h("div", {}, role || S.tab.title || ""),
-      h("div", { class: "muted small" }, host)
+      h("div", { class: "muted small" }, host),
+      eligNotice()
     )
   );
 
@@ -687,7 +717,7 @@ function filteredJobs() {
   const f = S.settings.filters;
   return S.jobsCache.items.filter((j) => {
     if (S.hideApplied && S.applied[j.key]) return false;
-    if (!Sources.matchesFilters(j, f, S.profile)) return false;
+    if (!Sources.matchesFilters(j, f, S.profile, S.eligSignals)) return false;
     if (!terms.length) return true;
     const hay = `${j.company} ${j.title} ${j.locations.join(" ")}`.toLowerCase();
     return terms.every((t) => hay.includes(t));
@@ -759,7 +789,7 @@ function renderJobs() {
         "div",
         { class: "row" },
         h("select", { style: { width: "auto" }, onchange: (e) => setF("maxAgeDays", Number(e.target.value)) }, [7, 14, 30, 90, 0].map((d) => h("option", { value: d, selected: f.maxAgeDays === d }, d ? `Posted in last ${d} days` : "Any age"))),
-        h("label", { class: "row" }, h("input", { type: "checkbox", checked: f.respectSponsorship, onchange: (e) => setF("respectSponsorship", e.target.checked) }), "Skip no-sponsorship roles if I need it")
+        h("label", { class: "row" }, h("input", { type: "checkbox", checked: f.hideIneligible ?? f.respectSponsorship, onchange: (e) => setF("hideIneligible", e.target.checked) }), "Hide jobs I can't apply to (from my U.S. work status)")
       )
     )
   );
@@ -787,15 +817,70 @@ function renderJobs() {
   update();
 }
 
+// ---------------------------------------------------- can you apply?
+
+const ELIG_TTL = 7 * 86400000;
+const saveElig = debounce(() => store.set("eligCache", S.eligStore), 1500);
+const rerenderJobsSoon = debounce(() => S.activeTab === "jobs" && renderJobs(), 600);
+const eligQueue = [];
+const eligQueued = new Set();
+let eligRunning = 0;
+
+// Fetch Simplify's job data (sponsorship, requirements) for these jobs, a
+// few at a time, and re-render as verdicts come in.
+function enrichEligibility(jobs) {
+  for (const j of jobs) {
+    if (!E.hasSimplifyPage(j) || S.eligSignals[j.id] || eligQueued.has(j.id)) continue;
+    eligQueued.add(j.id);
+    eligQueue.push(j);
+  }
+  pumpEligibility();
+}
+
+function pumpEligibility() {
+  while (eligRunning < 3 && eligQueue.length) {
+    const j = eligQueue.shift();
+    eligRunning++;
+    E.fetchSimplify(j.simplifyId)
+      .then((signals) => {
+        S.eligSignals[j.id] = signals;
+        S.eligStore[j.id] = { signals, at: Date.now() };
+        saveElig();
+        rerenderJobsSoon();
+        if (S.job?.listingId === j.id && S.activeTab === "apply") renderApply();
+      })
+      .catch(() => {})
+      .finally(() => {
+        eligRunning--;
+        setTimeout(pumpEligibility, 250);
+      });
+  }
+}
+
+function eligPill(v, checked) {
+  const tip = v.reasons.map((r) => `${r.text}\n  "${r.evidence}"`).join("\n") || "No work-authorization restrictions found";
+  if (v.level === "no") return h("span", { class: "pill bad", title: tip }, "✕ Can't apply");
+  if (v.level === "maybe") return h("span", { class: "pill warn", title: tip }, "? Check");
+  return checked ? h("span", { class: "pill good", title: tip }, "✓ Can apply") : null;
+}
+
+// Listing flags + Simplify data (+ the posting, when it's the open page).
+function signalsForJob(listing, jobKey) {
+  return [...(listing ? E.signalsFromListing(listing) : []), ...((listing && S.eligSignals[listing.id]) || []), ...((jobKey && S.eligPage[jobKey]) || [])];
+}
+
 function renderJobList(wrap, filtered) {
+  enrichEligibility(filtered.slice(0, S.jobsShown));
   const rows = filtered.slice(0, S.jobsShown).map((j) => {
     const applied = !!S.applied[j.key];
     const tailored = !!S.tailored[j.key];
+    const sig = signalsForJob(j);
+    const elig = eligPill(E.verdict(sig, S.profile), sig.length > 0 || S.eligSignals[j.id] !== undefined);
     return h(
       "div",
       { class: `job${applied ? " applied" : ""}`, onclick: () => openJob(j), title: `${j.url}\n${(j.sources || []).join(", ")}` },
       h("div", { class: "meta" }, h("div", { class: "company" }, j.company), h("div", { class: "title" }, j.title), h("div", { class: "loc" }, j.locations.join(" · "))),
-      h("div", { style: { textAlign: "right" } }, h("div", { class: "small muted" }, Jobs.ageLabel(j.posted)), applied ? h("span", { class: "pill good" }, "Applied") : tailored ? h("span", { class: "pill" }, "Tailored") : null)
+      h("div", { style: { textAlign: "right" } }, h("div", { class: "small muted" }, Jobs.ageLabel(j.posted)), applied ? h("span", { class: "pill good" }, "Applied") : tailored ? h("span", { class: "pill" }, "Tailored") : elig)
     );
   });
   const more =
@@ -836,8 +921,8 @@ async function refreshJobList() {
 
 // ------------------------------------------------------------- AUTOPILOT
 
-const STATUS_PILL = { queued: "", running: "", applied: "good", review: "info", "needs-you": "warn", manual: "", failed: "bad" };
-const STATUS_LABEL = { queued: "Queued", running: "Working", applied: "Applied", review: "Review & submit", "needs-you": "Needs you", manual: "Apply manually", failed: "Failed" };
+const STATUS_PILL = { queued: "", running: "", applied: "good", review: "info", "needs-you": "warn", manual: "", failed: "bad", ineligible: "bad" };
+const STATUS_LABEL = { queued: "Queued", running: "Working", applied: "Applied", review: "Review & submit", "needs-you": "Needs you", manual: "Apply manually", failed: "Failed", ineligible: "Not eligible" };
 const saveQueue = debounce(() => store.set("autopilotQueue", S.queue), 300);
 
 function autopilotCard() {
@@ -891,10 +976,10 @@ function autopilotCard() {
         { class: "row small", style: { margin: "8px 0 4px" } },
         Object.entries(counts).map(([k, n]) => h("span", { class: `pill ${STATUS_PILL[k] || ""}` }, `${STATUS_LABEL[k]} ${n}`)),
         h("span", { class: "spacer" }),
-        !S.autopilotRunning && h("button", { class: "btn ghost small", onclick: () => ((S.queue = S.queue.filter((i) => !["applied", "manual", "failed"].includes(i.status))), saveQueue(), renderJobs()) }, "Clear finished")
+        !S.autopilotRunning && h("button", { class: "btn ghost small", onclick: () => ((S.queue = S.queue.filter((i) => !["applied", "manual", "failed", "ineligible"].includes(i.status))), saveQueue(), renderJobs()) }, "Clear finished")
       )
     );
-    const order = { running: 0, review: 1, "needs-you": 2, queued: 3, failed: 4, manual: 5, applied: 6 };
+    const order = { running: 0, review: 1, "needs-you": 2, queued: 3, failed: 4, manual: 5, ineligible: 6, applied: 7 };
     for (const it of [...S.queue].sort((a, b) => order[a.status] - order[b.status])) card.append(queueRow(it));
   }
   return card;
@@ -1006,6 +1091,19 @@ async function startAutopilot(n) {
       return { name: /Cover_Letter/.test(name) ? name : name.replace(/\.pdf$/, "_Cover_Letter.pdf"), base64: pdf.base64 };
     },
     coverOnlyIfRequired: S.settings.coverAttach === "required",
+    // Can you apply? Listing flags + Simplify data + the posting itself.
+    eligibility: async (job, postingText) => {
+      const listing = S.jobsByKey.get(job.key);
+      if (listing && E.hasSimplifyPage(listing) && !S.eligSignals[listing.id]) {
+        try {
+          const signals = await E.fetchSimplify(listing.simplifyId);
+          S.eligSignals[listing.id] = signals;
+          S.eligStore[listing.id] = { signals, at: Date.now() };
+          saveElig();
+        } catch {}
+      }
+      return E.verdict([...signalsForJob(listing), ...E.signalsFromText(postingText || "")], S.profile);
+    },
   };
   const rerender = debounce(() => S.activeTab === "jobs" && renderJobs(), 150);
   try {
@@ -1853,7 +1951,26 @@ function renderSettings() {
     "div",
     { class: "card" },
     h("h3", {}, "Standard answers"),
+    h(
+      "label",
+      { class: "field" },
+      h("span", {}, "U.S. work status (decides which jobs you can apply to)"),
+      h(
+        "select",
+        {
+          onchange: (e) => {
+            p.workStatus = e.target.value;
+            Object.assign(p, E.authAnswersFor(p.workStatus) || {});
+            saveProfile();
+            renderSettings();
+          },
+        },
+        E.WORK_STATUSES.map(([v, t]) => h("option", { value: v, selected: (p.workStatus || "") === v }, t))
+      ),
+      !p.workStatus ? h("div", { class: "small muted" }, "Set this so JobPilot can mark jobs that require citizenship, work authorization or no sponsorship.") : null
+    ),
     h("div", { class: "grid2" }, sel("workAuthorized", "Authorized to work in the US?", YES_NO), sel("needsSponsorship", "Need visa sponsorship?", YES_NO)),
+    sel("clearance", "Active U.S. security clearance?", YES_NO),
     h("div", { class: "grid2" }, sel("over18", "18 or older?", YES_NO), sel("willingToRelocate", "Willing to relocate?", YES_NO)),
     pf("howHeard", "How did you hear about us?", "Job board"),
     pf("salaryExpectation", "Pay expectation (blank = you'll be asked)", "e.g. $40/hr or Open to discussion"),
@@ -2163,7 +2280,7 @@ function renderUpdateBanner(status) {
 async function init() {
   // The 5k-job cache is big: show the panel first, load it right after.
   const jobsPromise = Jobs.getJobs();
-  const [settings, profile, base, resumePdf, tailored, applied, cover, bank] = await Promise.all([
+  const [settings, profile, base, resumePdf, tailored, applied, cover, bank, eligStore] = await Promise.all([
     store.getSettings(),
     store.getProfile(),
     store.get("resume", null),
@@ -2172,8 +2289,11 @@ async function init() {
     store.get("applied", {}),
     store.get("coverLetter", null),
     store.get("answerBank", null),
+    store.get("eligCache", {}),
   ]).then((r) => ((r[6] = { ...C.DEFAULT_COVER, ...(r[6] || {}) }), (r[7] = r[7] || C.DEFAULT_BANK.map((b) => ({ ...b }))), r));
   Object.assign(S, { settings, profile, base, resumePdf, tailored, applied, cover, bank });
+  // Simplify eligibility data younger than a week.
+  for (const [id, e] of Object.entries(eligStore || {})) if (Date.now() - e.at < ELIG_TTL) (S.eligStore[id] = e), (S.eligSignals[id] = e.signals);
   jobsPromise.then((jobsCache) => {
     S.jobsLoaded = true;
     if (!S.jobsCache.fetchedAt || jobsCache.fetchedAt > S.jobsCache.fetchedAt) S.jobsCache = withKeys(jobsCache);

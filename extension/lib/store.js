@@ -56,6 +56,8 @@ export const DEFAULT_PROFILE = {
   gradLatest: "",
   currentCompany: "",
   currentTitle: "",
+  workStatus: "", // citizen | pr | authorized | student | none (eligibility.js); sets the two answers below
+  clearance: "no", // active U.S. security clearance
   workAuthorized: "yes",
   needsSponsorship: "no",
   over18: "yes",

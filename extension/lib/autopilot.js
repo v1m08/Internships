@@ -14,6 +14,7 @@
 //   review     filled, but has AI-written answers → you review + submit
 //   needs-you  blocker (CAPTCHA, login, missing required field, no confirmation)
 //   manual     site needs an account (Workday etc.); not opened
+//   ineligible your U.S. work status rules it out (eligibility.js); tab closed
 //   failed     error
 import * as G from "./grad.js";
 import { resolveStuck, fixInvalid } from "./resolve.js";
@@ -53,6 +54,15 @@ export async function runJob(job, ctx) {
     if (size.controls < 3) return { status: "needs-you", note: "Couldn't find the application form (login or unusual Apply button?).", tabId: tab.id };
 
     if (!posting) posting = await Page.readJobPosting(tab).catch(() => ({ text: "" }));
+
+    // Can you apply at all? Don't fill applications your status rules out.
+    if (ctx.eligibility) {
+      const v = await ctx.eligibility(job, posting?.text || "");
+      if (v.level === "no") {
+        await chrome.tabs.remove(tab.id).catch(() => {});
+        return { status: "ineligible", note: `${v.reasons[0].text}: "${v.reasons[0].evidence.slice(0, 120)}"` };
+      }
+    }
     if (!job.company || !job.title) {
       const meta = (await Page.callAll(tab, "jobMeta")).find((m) => m.company || m.role) || {};
       job = { ...job, company: job.company || meta.company, title: job.title || meta.role };

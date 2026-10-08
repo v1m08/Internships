@@ -2,6 +2,7 @@
 // .github/scripts/listings.json and README tables (HTML or Markdown), as
 // used by SimplifyJobs, vanshb03, speedyapply and most other lists.
 // No DOM APIs here: this also runs in the background service worker.
+import * as E from "./eligibility.js";
 
 export const DEFAULT_SOURCES = [
   { id: "simplify-2027", label: "SimplifyJobs/Summer2027-Internships", input: "SimplifyJobs/Summer2027-Internships", enabled: true },
@@ -62,6 +63,8 @@ export function parseListingsJson(text) {
       locations: j.locations || [],
       category: j.category || guessCategory(j.title || ""),
       sponsorship: j.sponsorship || "",
+      // Simplify's own listings have a job page with sponsorship data.
+      simplifyId: j.source === "Simplify" ? j.id : "",
       posted: j.date_posted || j.date_updated || 0,
     }));
 }
@@ -218,6 +221,11 @@ export async function fetchAll(sources) {
       if (byUrl.has(k) || byName.has(nameKey)) {
         const prev = byUrl.get(k);
         if (prev && !prev.sources.includes(src.label)) prev.sources.push(src.label);
+        // Keep whatever eligibility data either copy has.
+        if (prev) {
+          prev.simplifyId = prev.simplifyId || j.simplifyId || "";
+          if ((!prev.sponsorship || prev.sponsorship === "Other") && j.sponsorship && j.sponsorship !== "Other") prev.sponsorship = j.sponsorship;
+        }
         continue;
       }
       byName.add(nameKey);
@@ -236,7 +244,7 @@ export const DEFAULT_FILTERS = {
   locations: "", // comma-separated: any location must match one (e.g. "NY, remote, CA")
   categories: [], // empty = all
   maxAgeDays: 30,
-  respectSponsorship: true, // skip roles that can't sponsor / need citizenship when your profile needs sponsorship
+  hideIneligible: true, // hide jobs your U.S. work status rules out (eligibility.js)
 };
 
 const terms = (s) =>
@@ -245,7 +253,13 @@ const terms = (s) =>
     .map((t) => t.trim().toLowerCase())
     .filter(Boolean);
 
-export function matchesFilters(j, f, profile) {
+// Can-you-apply verdict for a listing: its own flags plus any Simplify job
+// data already fetched (eligCache: { [jobId]: signals[] }).
+export function listingVerdict(j, profile, eligCache = {}) {
+  return E.verdict([...E.signalsFromListing(j), ...(eligCache[j.id] || [])], profile);
+}
+
+export function matchesFilters(j, f, profile, eligCache = {}) {
   const title = `${j.title}`.toLowerCase();
   const all = `${j.company} ${j.title}`.toLowerCase();
   const inc = terms(f.include);
@@ -255,6 +269,6 @@ export function matchesFilters(j, f, profile) {
   if (locs.length && !j.locations.some((l) => locs.some((t) => l.toLowerCase().includes(t)))) return false;
   if (f.categories?.length && !f.categories.some((c) => j.category.toLowerCase().includes(c.toLowerCase().split("/")[0]))) return false;
   if (f.maxAgeDays && j.posted && Date.now() / 1000 - j.posted > f.maxAgeDays * 86400) return false;
-  if (f.respectSponsorship && profile?.needsSponsorship === "yes" && /does not offer|citizenship/i.test(j.sponsorship)) return false;
+  if ((f.hideIneligible ?? f.respectSponsorship) && profile && listingVerdict(j, profile, eligCache).level === "no") return false;
   return true;
 }
