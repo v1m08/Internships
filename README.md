@@ -89,9 +89,9 @@ For each job:
 6. Stops and leaves the tab for you when:
    - a question needs **your own words** and none of your answers fit (add one to *Your answers* and it's covered next time),
    - something is blocked (CAPTCHA, login, a missing required field),
-   - or the site needs an account (Workday, iCIMS, Taleo, Amazon, Microsoft…): marked **Apply manually**.
+   - or the site usually needs an account (Workday, iCIMS, Taleo, Amazon, Microsoft, Google): marked **Apply manually** (Try again attempts it anyway).
 
-Jobs that failed, needed you, or were marked not eligible have a **Try again** button (and **Try all again** for the whole list): it closes the old tab and runs them again right away, re-checking eligibility in case you changed your work status.
+Every finished job except submitted ones has a **Try again** button (and **Try all again** for failed, blocked, not-eligible and apply-manually jobs): it closes the old tab and runs the job again right away, re-checking eligibility in case you changed your work status. On an *Apply manually* job it attempts the site anyway and only stops if it actually lands on a sign-in page.
 
 Settings → Autopilot: auto-submit on/off, jobs at once, a randomized pause between applications, running in its own tab, and background checks for new jobs.
 

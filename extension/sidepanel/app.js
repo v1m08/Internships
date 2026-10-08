@@ -1029,7 +1029,7 @@ function autopilotCard() {
         { class: "row small", style: { margin: "8px 0 4px" } },
         Object.entries(counts).map(([k, n]) => h("span", { class: `pill ${STATUS_PILL[k] || ""}` }, `${STATUS_LABEL[k]} ${n}`)),
         h("span", { class: "spacer" }),
-        S.queue.some((i) => RETRYABLE.includes(i.status)) && h("button", { class: "btn ghost small", disabled: runningElsewhere(), onclick: () => tryAgain(S.queue.filter((i) => RETRYABLE.includes(i.status))) }, "Try all again"),
+        S.queue.some((i) => BULK_RETRY.includes(i.status)) && h("button", { class: "btn ghost small", disabled: runningElsewhere(), onclick: () => tryAgain(S.queue.filter((i) => BULK_RETRY.includes(i.status))) }, "Try all again"),
         !S.autopilotRunning && h("button", { class: "btn ghost small", onclick: () => ((S.queue = S.queue.filter((i) => !["applied", "manual", "failed", "ineligible"].includes(i.status))), saveQueue(), renderJobs()) }, "Clear finished")
       )
     );
@@ -1039,8 +1039,10 @@ function autopilotCard() {
   return card;
 }
 
-// Jobs worth another go: errors, blockers, and eligibility (your status may have changed).
-const RETRYABLE = ["failed", "needs-you", "ineligible"];
+// Every finished job except submitted ones (retrying those would apply twice).
+const RETRYABLE = ["failed", "needs-you", "ineligible", "manual", "review"];
+// "Try all again" leaves filled tabs that are waiting for your review alone.
+const BULK_RETRY = ["failed", "needs-you", "ineligible", "manual"];
 const runningElsewhere = () => !S.autopilotRunning && S.queue.some((i) => i.status === "running");
 
 // Put jobs back in the queue and run them now (no new jobs are added).
@@ -1048,7 +1050,8 @@ async function tryAgain(items) {
   if (runningElsewhere()) return toast("Autopilot is running in its JobPilot tab. Try again when it finishes.", true);
   for (const it of items) {
     if (it.tabId) chrome.tabs.remove(it.tabId).catch(() => {});
-    Object.assign(it, { status: "queued", note: "", tabId: null, finishedAt: null });
+    // "Apply manually" sites get attempted this time instead of skipped.
+    Object.assign(it, { status: "queued", note: "", tabId: null, finishedAt: null, force: it.force || it.status === "manual" });
     // Move to the end so a run already in progress here picks it up.
     S.queue = S.queue.filter((x) => x !== it);
     S.queue.push(it);
@@ -1093,7 +1096,19 @@ function queueRow(it) {
       ? h(
           "div",
           { class: "row", style: { marginTop: "4px" } },
-          RETRYABLE.includes(it.status) && h("button", { class: "btn small", disabled: runningElsewhere(), onclick: () => tryAgain([it]) }, it.feedback ? "Try again (with your feedback)" : "Try again"),
+          RETRYABLE.includes(it.status) &&
+            h(
+              "button",
+              {
+                class: "btn small",
+                disabled: runningElsewhere(),
+                onclick: () => {
+                  if (it.status === "review" && !confirm("Close the filled-in tab and start this application over?")) return;
+                  tryAgain([it]);
+                },
+              },
+              it.feedback ? "Try again (with your feedback)" : "Try again"
+            ),
           h("button", { class: "btn ghost small", onclick: open }, it.tabId ? "Go to tab" : "Open"),
           !["failed", "ineligible"].includes(it.status) && h("button", { class: "btn ghost small", onclick: markApplied }, "I submitted it"),
           h(
@@ -1119,7 +1134,7 @@ function queueRow(it) {
 // your note (Claude also applies the note after filling).
 function queueFeedback(it) {
   const hasTab = it.tabId && ["review", "needs-you"].includes(it.status);
-  if (!hasTab && !["failed", "needs-you"].includes(it.status)) return null;
+  if (!hasTab && !["failed", "needs-you", "manual"].includes(it.status)) return null;
   return feedbackBox({
     key: `q:${it.id}`,
     button: hasTab ? "Fix with feedback" : "Try again with feedback",

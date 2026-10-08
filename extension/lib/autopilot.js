@@ -22,7 +22,9 @@ import { resumeToText } from "./pdf.js";
 import * as Page from "./page.js";
 import { prepareJob, tailoredEntry } from "./tailor.js";
 
-const ACCOUNT_SITES = /myworkdayjobs\.com|workday\.com|icims\.com|taleo\.net|successfactors|oraclecloud\.com|brassring|amazon\.jobs|careers\.microsoft\.com|metacareers\.com|google\.com\/about\/careers|careers\.google\.com/i;
+// Sites that usually need an account. Skipped by default; "Try again" on one
+// (ctx.force) attempts it anyway and stops only at an actual sign-in page.
+const ACCOUNT_SITES = /myworkdayjobs\.com|workday\.com|icims\.com|taleo\.net|successfactors|oraclecloud\.com|brassring|amazon\.jobs|careers\.microsoft\.com|google\.com\/about\/careers|careers\.google\.com/i;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const MAX_PAGES = 6; // multi-page forms: Next/Continue up to this many times
 const isTyped = (q) => q.kind === "short_text" || q.kind === "long_text";
@@ -31,7 +33,7 @@ const isTyped = (q) => q.kind === "short_text" || q.kind === "long_text";
 //        resumeFileFor(job, tailored) → Promise<{name, base64}>, step(text) }
 export async function runJob(job, ctx) {
   const step = ctx.step || (() => {});
-  if (ACCOUNT_SITES.test(job.url)) return { status: "manual", note: "Needs an account on this site. Open it and click Autofill on each page." };
+  if (ACCOUNT_SITES.test(job.url) && !ctx.force) return { status: "manual", note: "This site usually needs an account. Try again to attempt it anyway, or open it and click Autofill on each page." };
 
   step("Opening");
   let tab = await chrome.tabs.create({ url: job.url, active: false });
@@ -51,7 +53,10 @@ export async function runJob(job, ctx) {
       size = await Page.waitForForm(tab);
     }
     tab = await chrome.tabs.get(tab.id);
-    if (size.controls < 3) return { status: "needs-you", note: "Couldn't find the application form (login or unusual Apply button?).", tabId: tab.id };
+    if (size.controls < 3) {
+      const signIn = (await Page.callAll(tab, "signInWall").catch(() => [])).some(Boolean);
+      return { status: signIn ? "manual" : "needs-you", note: signIn ? "This site wants you to sign in first. Sign in in that tab, then Try again." : "Couldn't find the application form (unusual Apply button?).", tabId: tab.id };
+    }
 
     if (!posting) posting = await Page.readJobPosting(tab).catch(() => ({ text: "" }));
 
@@ -221,7 +226,7 @@ export async function runQueue(items, ctx, { concurrency = 2, onUpdate, shouldSt
       item.status = "running";
       item.note = "";
       onUpdate(item);
-      const res = await runJob(item.job, { ...ctx, feedback: item.feedback || "", step: (s) => ((item.note = s), onUpdate(item)) });
+      const res = await runJob(item.job, { ...ctx, feedback: item.feedback || "", force: !!item.force, step: (s) => ((item.note = s), onUpdate(item)) });
       Object.assign(item, res, { finishedAt: Date.now() });
       onUpdate(item);
     }

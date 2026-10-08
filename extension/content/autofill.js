@@ -921,6 +921,13 @@
     return out;
   }
 
+  // A sign-in page instead of an application form.
+  function signInWall() {
+    const pw = [...document.querySelectorAll('input[type="password"]')].some(visibleEl);
+    const text = (document.body.innerText || "").slice(0, 5000);
+    return pw || /\b(sign in|log in|create (an )?account|sign up) to (apply|continue)\b/i.test(text);
+  }
+
   function submit() {
     const re = SUBMIT_RE;
     const forms = [...document.querySelectorAll("form")].filter((f) => f.querySelector("input, textarea, select"));
@@ -964,6 +971,7 @@
     clickNext,
     invalidFields,
     snapshotFields,
+    signInWall,
     _labelFor: labelFor,
     _classify: classify,
   };
