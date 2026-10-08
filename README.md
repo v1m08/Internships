@@ -124,6 +124,8 @@ Every listing is then scored against it without AI:
 - **Not a fit** (hidden by **Filters → Only jobs that fit my resume**, on by default): the listing is only for Master's/PhD students (from Simplify's degree data or the title, e.g. "MS/PhD"), its term already started (a Fall 2026 co-op in October 2026), it's in a field you ruled out, or it's in a category you don't target.
 - **★ Good fit**: your category and a strong title match. **~ Stretch**: another category, but clearly your kind of role (e.g. a software role filed under Hardware).
 
+**Only fresh listings.** Autopilot never applies to a job posted more than 7 days ago (Settings → Autopilot → *Only apply to jobs posted in the last…*), or to one with no posting date. It checks when picking jobs and again right before each one, so older jobs already in the queue are marked *Too old* (Try again if you really want one). The job list also shows the last 7 days by default.
+
 Good fits are listed first, so Autopilot starts with them. Autopilot also checks each posting's text and skips ones that require a graduate program as *Not a fit* (Try again if you want to apply anyway).
 
 ## Can you apply? (work authorization)

@@ -171,7 +171,7 @@ function render() {
 // --------------------------------------------------------- job context
 
 function jobFromListing(l) {
-  return { key: Jobs.jobKeyForUrl(l.url), listingId: l.id, company: l.company, title: l.title, url: l.url, locations: l.locations };
+  return { key: Jobs.jobKeyForUrl(l.url), listingId: l.id, company: l.company, title: l.title, url: l.url, locations: l.locations, posted: l.posted || 0 };
 }
 
 async function refreshContext() {
@@ -1105,8 +1105,8 @@ async function refreshJobList() {
 
 // ------------------------------------------------------------- AUTOPILOT
 
-const STATUS_PILL = { queued: "", running: "", applied: "good", review: "info", "needs-you": "warn", manual: "", failed: "bad", ineligible: "bad", notfit: "" };
-const STATUS_LABEL = { queued: "Queued", running: "Working", applied: "Applied", review: "Review & submit", "needs-you": "Needs you", manual: "Apply manually", failed: "Failed", ineligible: "Not eligible", notfit: "Not a fit" };
+const STATUS_PILL = { queued: "", running: "", applied: "good", review: "info", "needs-you": "warn", manual: "", failed: "bad", ineligible: "bad", notfit: "", stale: "" };
+const STATUS_LABEL = { queued: "Queued", running: "Working", applied: "Applied", review: "Review & submit", "needs-you": "Needs you", manual: "Apply manually", failed: "Failed", ineligible: "Not eligible", notfit: "Not a fit", stale: "Too old" };
 // Saved right away: debounce timers get throttled while the run tab is hidden.
 const saveQueue = () => store.set("autopilotQueue", S.queue);
 
@@ -1162,17 +1162,17 @@ function autopilotCard() {
         Object.entries(counts).map(([k, n]) => h("span", { class: `pill ${STATUS_PILL[k] || ""}` }, `${STATUS_LABEL[k]} ${n}`)),
         h("span", { class: "spacer" }),
         S.queue.some((i) => BULK_RETRY.includes(i.status)) && h("button", { class: "btn ghost small", disabled: runningElsewhere(), onclick: () => tryAgain(S.queue.filter((i) => BULK_RETRY.includes(i.status))) }, "Try all again"),
-        !S.autopilotRunning && h("button", { class: "btn ghost small", onclick: () => ((S.queue = S.queue.filter((i) => !["applied", "manual", "failed", "ineligible", "notfit"].includes(i.status))), saveQueue(), renderJobs()) }, "Clear finished")
+        !S.autopilotRunning && h("button", { class: "btn ghost small", onclick: () => ((S.queue = S.queue.filter((i) => !["applied", "manual", "failed", "ineligible", "notfit", "stale"].includes(i.status))), saveQueue(), renderJobs()) }, "Clear finished")
       )
     );
-    const order = { running: 0, review: 1, "needs-you": 2, queued: 3, failed: 4, manual: 5, ineligible: 6, notfit: 7, applied: 8 };
+    const order = { running: 0, review: 1, "needs-you": 2, queued: 3, failed: 4, manual: 5, ineligible: 6, notfit: 7, stale: 8, applied: 9 };
     for (const it of [...S.queue].sort((a, b) => order[a.status] - order[b.status])) card.append(queueRow(it));
   }
   return card;
 }
 
 // Every finished job except submitted ones (retrying those would apply twice).
-const RETRYABLE = ["failed", "needs-you", "ineligible", "manual", "review", "notfit"];
+const RETRYABLE = ["failed", "needs-you", "ineligible", "manual", "review", "notfit", "stale"];
 // "Try all again" leaves filled tabs that are waiting for your review alone.
 const BULK_RETRY = ["failed", "needs-you", "ineligible", "manual"];
 const runningElsewhere = () => !S.autopilotRunning && S.queue.some((i) => i.status === "running");
@@ -1184,7 +1184,7 @@ async function tryAgain(items) {
     if (it.tabId) chrome.tabs.remove(it.tabId).catch(() => {});
     // "Apply manually" sites get attempted this time instead of skipped.
     // "Apply manually" sites get attempted this time; "Not a fit" means you disagreed.
-    Object.assign(it, { status: "queued", note: "", tabId: null, finishedAt: null, force: it.force || it.status === "manual" || it.status === "notfit" });
+    Object.assign(it, { status: "queued", note: "", tabId: null, finishedAt: null, force: it.force || ["manual", "notfit", "stale"].includes(it.status) });
     // Move to the end so a run already in progress here picks it up.
     S.queue = S.queue.filter((x) => x !== it);
     S.queue.push(it);
@@ -1234,7 +1234,7 @@ function queueRow(it) {
       h("span", { class: `pill ${STATUS_PILL[it.status] || ""}` }, it.status === "running" ? [spinner(), " "] : null, STATUS_LABEL[it.status])
     ),
     it.note ? h("div", { class: "small muted", style: { marginTop: "2px" } }, it.note, it.status === "running" && it.stepAt ? h("span", { class: "elapsed", "data-at": it.stepAt }, ` · ${timeOnStep(it.stepAt)}`) : null) : null,
-    ["review", "needs-you", "manual", "failed", "ineligible", "notfit"].includes(it.status)
+    ["review", "needs-you", "manual", "failed", "ineligible", "notfit", "stale"].includes(it.status)
       ? h(
           "div",
           { class: "row", style: { marginTop: "4px" } },
@@ -1312,6 +1312,7 @@ async function startAutopilot(n) {
   const inQueue = new Set(S.queue.map((i) => i.job.key));
   const picks = filteredJobs()
     .filter((j) => !S.applied[j.key] && !inQueue.has(j.key) && !S.saved[j.key]) // saved = you'll do it yourself
+    .filter((j) => !(S.settings.autopilot.maxAgeDays ?? 7) || Autopilot.isFresh(j.posted, S.settings.autopilot.maxAgeDays ?? 7))
     .slice(0, n)
     .map((j) => ({ id: j.key, job: jobFromListing(j), status: "queued", note: "" }));
   S.queue.push(...picks);
@@ -1346,6 +1347,8 @@ async function startAutopilot(n) {
       return { name: /Cover_Letter/.test(name) ? name : name.replace(/\.pdf$/, "_Cover_Letter.pdf"), base64: pdf.base64 };
     },
     coverOnlyIfRequired: S.settings.coverAttach === "required",
+    // Posting date for queue items saved before jobs carried one.
+    postedFor: (job) => S.jobsByKey.get(job.key)?.posted || 0,
     // Is it a fit? The posting's own degree requirements (title/listing were
     // already used to pick it).
     fit: (job, postingText) => Fit.fitFromPosting(postingText, S.settings.target),
@@ -2422,6 +2425,12 @@ function renderSettings() {
     apBool("tailor", "Tailor the resume for each job"),
     apBool("notify", "Notify me about new matching jobs"),
     apNum("concurrency", "Jobs at once", [1, 2, 3, 4].map((n) => [n, String(n)])),
+    apNum("maxAgeDays", "Only apply to jobs posted in the last", [
+      [3, "3 days"],
+      [7, "7 days"],
+      [14, "14 days"],
+      [30, "30 days"],
+    ]),
     apNum("pauseSec", "Pause between applications (randomized)", [
       [0, "None"],
       [15, "About 15 seconds"],

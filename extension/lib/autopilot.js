@@ -16,6 +16,7 @@
 //   manual     site needs an account (Workday etc.); not opened
 //   ineligible your U.S. work status rules it out (eligibility.js); tab closed
 //   notfit     the posting requires a degree program you're not in (fit.js)
+//   stale      posted longer ago than Settings → Autopilot allows (default 7 days)
 //   failed     error
 import * as G from "./grad.js";
 import { resolveStuck, fixInvalid, fixWithFeedback } from "./resolve.js";
@@ -38,6 +39,12 @@ const isTyped = (q) => q.kind === "short_text" || q.kind === "long_text";
 //        resumeFileFor(job, tailored) → Promise<{name, base64}>, step(text) }
 export async function runJob(job, ctx) {
   const step = ctx.step || (() => {});
+  // Never apply to old listings (or ones with no posting date).
+  const maxDays = ctx.settings.autopilot.maxAgeDays ?? 7;
+  const posted = job.posted || ctx.postedFor?.(job) || 0;
+  if (maxDays > 0 && !ctx.force && !isFresh(posted, maxDays)) {
+    return { status: "stale", note: posted ? `Posted ${Math.floor((Date.now() / 1000 - posted) / 86400)} days ago; Autopilot only applies to jobs from the last ${maxDays} days.` : "No posting date, so it can't be confirmed as recent." };
+  }
   if (ACCOUNT_SITES.test(job.url) && !ctx.force) return { status: "manual", note: "This site usually needs an account. Try again to attempt it anyway, or open it and click Autofill on each page." };
 
   step("Opening");
@@ -222,6 +229,11 @@ export async function runJob(job, ctx) {
   } catch (e) {
     return { status: "failed", note: e.message || String(e), tabId: tab.id };
   }
+}
+
+// posted: epoch seconds (0 = unknown, which doesn't count as fresh).
+export function isFresh(posted, maxDays) {
+  return !!posted && Date.now() / 1000 - posted <= maxDays * 86400;
 }
 
 // Each worker gets its own unfocused Autopilot window and opens jobs as that

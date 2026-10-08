@@ -246,7 +246,7 @@ export const DEFAULT_FILTERS = {
   exclude: "", // comma-separated: skip if role/company matches (e.g. "phd, senior")
   locations: "", // comma-separated: any location must match one (e.g. "NY, remote, CA")
   categories: [], // empty = all
-  maxAgeDays: 30,
+  maxAgeDays: 7,
   hideIneligible: true, // hide jobs your U.S. work status rules out (eligibility.js)
   fitOnly: true, // hide jobs that don't fit your resume (fit.js: degree level, field, term)
 };

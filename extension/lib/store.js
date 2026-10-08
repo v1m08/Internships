@@ -9,6 +9,7 @@ export const DEFAULT_AUTOPILOT = {
   refreshHours: 3, // background refresh of job sources; 0 = off
   notify: true,
   ownTab: true, // run in a pinned JobPilot tab so closing the side panel doesn't stop it
+  maxAgeDays: 7, // never apply to listings posted longer ago than this (or with no posting date)
   pauseSec: 30, // average pause between applications (randomized), so runs look and pace like a person
 };
 
@@ -90,6 +91,11 @@ export async function getSettings() {
   s.filters = { ...DEFAULT_FILTERS, ...s.filters };
   s.autopilot = { ...DEFAULT_AUTOPILOT, ...s.autopilot };
   s.target = { ...DEFAULT_TARGET, ...s.target };
+  // The job list used to default to 30 days; move that old default to 7 once.
+  if (!s.ageDefault7) {
+    if (s.filters.maxAgeDays === 30) s.filters.maxAgeDays = 7;
+    s.ageDefault7 = true;
+  }
   return s;
 }
 
